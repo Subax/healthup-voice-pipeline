@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 로컬 vLLM 서버를 docker로 띄운다 (OpenAI 호환, 127.0.0.1:8000).
-# 환경변수: LLM_MODEL_PATH, LLM_GPU_UTIL(기본 0.35), LLM_MTP=1(MTP 추측 디코딩, 선택)
+# 환경변수: LLM_MODEL_PATH, LLM_GPU_UTIL(기본 0.35), LLM_MTP(기본 1, MTP 추측 디코딩. 0이면 끈다)
 set -euo pipefail
 
 NAME=healthup-llm
@@ -22,7 +22,7 @@ ARGS=(
   --language-model-only
 )
 
-if [[ "${LLM_MTP:-0}" == "1" ]]; then
+if [[ "${LLM_MTP:-1}" == "1" ]]; then
   # MTP 추측 디코딩 (Qwen3_5MTP 등록 확인). 체크포인트에 MTP 가중치가 있어야 한다
   ARGS+=(--speculative-config '{"method":"mtp","num_speculative_tokens":2}')
 fi
