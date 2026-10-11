@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from voice_pipeline.normalize import normalize_for_tts  # noqa: E402
 from voice_pipeline.trace import percentile  # noqa: E402
+from voice_pipeline.tts.cosyvoice import CosyVoiceTTS  # noqa: E402
 from voice_pipeline.tts.mock import MockTTS  # noqa: E402
 
 
@@ -36,7 +37,7 @@ def _not_yet(name: str):
 ENGINES = {
     "mock": lambda: MockTTS(first_audio_ms=80, rtf=0.1),
     "omnivoice": _not_yet("omnivoice"),
-    "cosyvoice3": _not_yet("cosyvoice3"),
+    "cosyvoice3": lambda: CosyVoiceTTS(),
     "azure": _not_yet("azure"),
     "clova": _not_yet("clova"),
     "qwen3": _not_yet("qwen3"),

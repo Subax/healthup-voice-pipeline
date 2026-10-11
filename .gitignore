@@ -9,3 +9,4 @@ dist/
 bench/results/
 models/
 *.wav
+services/cosyvoice/CosyVoice/
