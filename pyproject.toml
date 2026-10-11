@@ -1,0 +1,25 @@
+[project]
+name = "healthup-voice-pipeline"
+version = "0.1.0"
+description = "HealthUp Station 버츄얼휴먼 음성 파이프라인 (STT·TTS·barge-in·Unreal 브리지)"
+requires-python = ">=3.10"
+dependencies = [
+    "aiohttp>=3.9",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+speaker = ["sounddevice>=0.4"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
