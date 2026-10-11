@@ -41,7 +41,7 @@
 
 **실행 중인 서비스 (2026-10-11 세션 끝 기준)**
 
-- `healthup-llm` (vLLM, 127.0.0.1:8000), `healthup-cosyvoice` (127.0.0.1:8091)
+- `healthup-llm` (vLLM, 127.0.0.1:8000), `healthup-cosyvoice` (127.0.0.1:8091), 웹 데모 (`scripts/run_demo.sh`, 127.0.0.1:8080)
 - 메모리: 사용 69GB, 가용 52GB
 
 **실측 (개발 장비 AI TOP ATOM, GB10, 2026-10-11). 기능 확인용이며 최종 수치가 아니다**
@@ -104,7 +104,7 @@
 
 - 한 일: STT·LLM·TTS 실제 엔진을 붙이고 localhost 웹 데모를 만들었다
 - 작업 방식: 코딩은 Sonnet 5.5(medium) 에이전트가 했다. 주 에이전트가 diff·테스트·실측으로 검증했다
-- 확인: 테스트 96개 통과. 헤드리스 Chromium + 가짜 마이크로 3턴 대화와 barge-in을 확인했다
+- 확인: 테스트 96개 통과. 헤드리스 Chromium + 가짜 마이크로 3턴 대화와 barge-in을 확인했다 (`bench/web_e2e.py`)
 - barge-in: 재생 중 두 번째 발화가 턴 1을 2457ms 지점에서 멈췄다 (`playback stopped`)
 - 사용자 결정: LLM은 Qwen3.8-27B(Apache-2.0). 입력은 브라우저 마이크. 참조 음성은 공식 예제. 단계마다 커밋
 - 결정: LLM은 메모리 대역폭 때문에 `nvidia/Qwen3.8-27B-NVFP4`를 쓴다. bf16 원본은 대비책이다

@@ -96,11 +96,16 @@ healthup/                      ← 상위 폴더 (저장소 아님)
       audio.py                 AudioFrame, Framer, fade_out
       trace.py                 턴 추적 기록, P50·P90
       sinks.py                 MemorySink(테스트), LocalSpeakerSink(sounddevice)
-      llm/                     §32 이벤트(임시 스키마), MockLLM, SSE 서버·클라이언트
-      tts/                     TTSEngine 인터페이스(base.py), MockTTS — 새 엔진은 여기
-      bridge/                  Unreal WebSocket 싱크, 프레임 형식, 가짜 Unreal 서버
-    bench/                     tts_bench.py(ENGINES 등록), latency_sim.py, sentences_ko.txt
-    tests/                     청커·정규화·barge-in·119·브리지·SSE 테스트
+      stt/                     STTEngine 인터페이스, SenseVoiceSTT, VADSegmenter (sherpa-onnx, CPU)
+      llm/                     §32 이벤트(임시 스키마), MockLLM, SSE, OpenAIStreamLLM(vLLM)
+      tts/                     TTSEngine 인터페이스(base.py), MockTTS, CosyVoiceTTS — 새 엔진은 여기
+      bridge/                  Unreal WebSocket 싱크, 프레임 형식, 서버 쪽 싱크, 가짜 Unreal 서버
+      web/                     localhost 웹 데모 (브라우저 = 재생 주체)
+    services/cosyvoice/        CosyVoice3 서버 이미지 (GB10 aarch64, transformers 4.51.3 고정)
+    scripts/                   run_llm.sh·stop_llm.sh (vLLM docker), run_demo.sh
+    models/                    모델 파일 (gitignore 대상, 받는 법은 README)
+    bench/                     tts_bench·tts_roundtrip(CER)·stt_bench·llm_bench·web_e2e, sentences_ko.txt(40)
+    tests/
 ```
 
 ## 6. 명령어 (저장소 루트에서)
@@ -111,6 +116,10 @@ healthup/                      ← 상위 폴더 (저장소 아님)
 .venv/bin/python bench/tts_bench.py --engine mock             # TTS 벤치 (--save-wav로 청취 파일)
 .venv/bin/python -m voice_pipeline.llm.sse --port 8090        # 모의 LLM 서버
 .venv/bin/python -m voice_pipeline.bridge.fake_unreal --port 8765  # 가짜 Unreal 서버
+services/cosyvoice/run.sh                                     # TTS 서버 (127.0.0.1:8091)
+scripts/run_llm.sh                                            # vLLM (127.0.0.1:8000, 준비 약 6분)
+scripts/run_demo.sh                                           # 웹 데모 (http://localhost:8080/)
+.venv/bin/python bench/tts_roundtrip.py bench/results/<dir>   # TTS 발음 검사 (왕복 CER)
 ```
 
 새 TTS 엔진: `tts/`에 `TTSEngine` 구현 → `bench/tts_bench.py`의 `ENGINES`에 등록 → 같은 문장 세트로 TTFA·RTF 측정.
