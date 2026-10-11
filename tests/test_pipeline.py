@@ -24,7 +24,7 @@ async def test_normal_turn_marks_and_frames(fast_llm, fast_tts):
     assert [f.seq for f in frames] == list(range(len(frames)))
     assert frames[-1].is_last
     assert not r.interrupted
-    assert "128에 82" in r.spoken_text and "36.5도" in r.spoken_text  # 정규화 + 소수점 보호
+    assert "백이십팔에 팔십이" in r.spoken_text and "삼십육 점 오도" in r.spoken_text  # 정규화 + 소수점 보호
     assert p.history[-1] == {"role": "assistant", "content": r.spoken_text}
     assert states(sink)[0] == "thinking" and "speaking" in states(sink) and states(sink)[-1] == "listening"
 

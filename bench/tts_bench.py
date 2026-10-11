@@ -90,6 +90,8 @@ async def main() -> None:
     print(f"\n{args.engine}: n={len(ttfas)}  "
           f"TTFA P50 {percentile(ttfas, 50):.1f}ms / P90 {percentile(ttfas, 90):.1f}ms  "
           f"RTF P50 {percentile(rtfs, 50):.3f} / P90 {percentile(rtfs, 90):.3f}")
+    if hasattr(engine, "aclose"):
+        await engine.aclose()
 
 
 if __name__ == "__main__":
