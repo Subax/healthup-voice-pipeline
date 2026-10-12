@@ -28,7 +28,8 @@
 - STT: `stt/` — `SenseVoiceSTT`(sherpa-onnx, CPU, INT8 2024-07-17), `VADSegmenter`(Silero, 무음 500ms 종료)
 - LLM: `llm/openai_stream.py` — vLLM 스트리밍, 생각 모드 끔. `scripts/run_llm.sh` (MTP 기본 켬)
 - TTS: `services/cosyvoice/` 서버 이미지 + `tts/cosyvoice.py` 어댑터. 스트리밍·연결 끊김 시 생성 중단
-- 목소리 프리셋 (`GET /voices`): 여성 화자 하나(공식 예제). `calm`(기본), `comfort`, `warm`, `steady`(instruct 지시문), `bright`(기존). `calm2`는 삭제했다
+- 목소리 프리셋 (`GET /voices`): 한국어 여성 참조 음성(`models/voices/ko_female_a.wav`, 사용자 제공 `koreanFemale.mp3`에서 자름). `calm`(기본), `comfort`, `warm`, `steady`(instruct, 지시문은 중국어·영어 그대로), `ko_a`·`ko_b`(zero_shot, 참조 운율 복제), `zh_calm`(옛 중국어 참조, 비교용). `bright`는 삭제했다
+  - 한국어 지시문은 쓸 수 없다. 모델이 지시문을 본문처럼 읽는다 (40문장 CER P50 1.0 이상)
 - 자동 톤 (`tone.py`): 화면 기본값 「자동」. SenseVoice 감정 태그와 음량·말 속도로 턴마다 톤을 고른다. 임계값은 미튜닝 추측값이다
 - STT 엔진 2개: `sensevoice`(CPU, 기본), `qwen3asr`(Qwen3-ASR-1.7B FP8 기본, vLLM 컨테이너 `healthup-asr` 127.0.0.1:8092, `scripts/run_asr.sh`, `ASR_MODEL_PATH`로 0.6B 선택)
 - 턴 종료 (`endpoint/`): VAD 멈춤 200ms마다 STT + Smart Turn v3.2(ONNX CPU) + Kiwi 끝 어절 → `rules.py` 대기표 → 확정. 재발화 시 판단 버림
@@ -66,6 +67,7 @@
 | TTS | CosyVoice3, 40문장, 단독 | TTFA P50 723ms / P90 737ms, RTF P50 0.37 / P90 0.41 |
 | TTS | 같은 조건, LLM 1개 동시 생성 (MTP 켬) | TTFA P50 1426ms / P90 1485ms, RTF P50 0.76 / P90 0.92 |
 | TTS 발음 | 왕복 CER, 40문장 | P50 0.07 / P90 0.37 |
+| TTS 참조 음성 | 40문장, LLM 유휴, 2026-10-12. CER P50/P90, TTFA P50 | zh_calm 0.08/0.31, 727ms. calm(한국어 참조+중국어 지시) 0.06/0.33, 757ms. ko_a 0.05/0.29, 841ms. ko_b 0.08/0.33, 977ms. comfort·warm·steady 0.08~0.09/0.33~0.35 |
 | 전 구간 | 헤드리스 Chromium + 가짜 마이크(ko.wav), 3턴, 2026-10-11 | 재생 시작 2562 / 3068 / 2987ms |
 | 전 구간 | 같은 조건, 새 프롬프트 + first_min 2 + calm, 2026-10-12 | 재생 시작 1834 / 2726 / 2335ms |
 | 첫 소리 | `first_audio_bench.py`, GPU 유휴, n=20, 옛 프롬프트 first_min 8 | 첫 청크 P50 1554 / P90 2428, 합계 P50 3112 / P90 3845ms |
@@ -139,6 +141,15 @@
 ---
 
 ## 3. 세션 로그 (최신이 위)
+
+### 2026-10-12 (6) — 한국어 참조 음성으로 교체
+
+- 한 일: 사용자가 억양이 중국어 같다고 지적했다. 원인은 중국어 참조 음성(공식 예제)이었다. 사용자 제공 `koreanFemale.mp3`(25.9초)를 잘라 참조 A(10.7초)·B(12.1초)를 만들었다. 전사는 Qwen3-ASR로 하고 "피언할"을 "피어날"로 고쳤다
+- 확인한 것: 한국어 instruct 지시문은 본문에 읽혀 나온다 (CER 1.0 이상). 중국어·영어 지시문 + 한국어 참조는 정상이다 (CER P50 0.06~0.11)
+- 확인한 것: 억양 개선 여부는 사람이 듣지 않았다. 비교 파일: `bench/results/ko_listen/` (zh_calm → calm → ko_a → ko_b 순서)
+- 코드 변경: `services/cosyvoice/server.py` 프리셋. 웹 데모 맞장구 일부가 길이 범위 밖으로 버려진다 (ko_a·ko_b·zh_calm·comfort 일부)
+- 참고: TTS 후보 조사 — Chatterbox Multilingual(MIT, 한국어 포함)이 새 후보다. Fish Audio S2는 비상업 라이선스라 제외. OBJECTIVE §4는 바꾸지 않았다
+- 다음: 청취 비교 후 기본 목소리(`calm` 또는 `ko_a`)를 정한다
 
 ### 2026-10-12 (5) — 어미+운율 턴 종료, 실시간 판단 표시
 

@@ -45,26 +45,46 @@ SYS = "You are a helpful assistant."
 ASSET = "/opt/CosyVoice/asset"
 WAV_Z = os.environ.get("COSYVOICE_PROMPT_WAV", f"{ASSET}/zero_shot_prompt.wav")
 
+log = logging.getLogger("cosyvoice-server")
+
+
+def _ko_wav(env: str, path: str) -> str:
+    """한국어 참조 wav 가 없으면 경고하고 WAV_Z 로 대체한다 (서버는 계속 뜬다)."""
+    p = os.environ.get(env, path)
+    if not os.path.exists(p):
+        log.warning("한국어 참조 wav 없음: %s -> WAV_Z 로 대체", p)
+        return WAV_Z
+    return p
+
+
+# 한국어 여성 참조 음성 (models/voices, 24kHz mono)
+KO_WAV_A = _ko_wav("COSYVOICE_KO_WAV_A", "/models/voices/ko_female_a.wav")
+KO_TEXT_A = SYS + "<|endofprompt|>잠시 모든 걸 내려놓고, 깊은 숨을 내쉬어 보세요. 당신은 존재만으로도 충분히 귀하고 아름다운 사람입니다."
+KO_WAV_B = _ko_wav("COSYVOICE_KO_WAV_B", "/models/voices/ko_female_b.wav")
+KO_TEXT_B = SYS + "<|endofprompt|>당신에게 마음을 움직이는 목소리를 선물하고 싶습니다. 당신의 소중한 이야기들이 가장 아름다운 빛으로 피어날 수 있도록 제가 함께하겠습니다."
+
 # 목소리 프리셋: mode = zero_shot(프롬프트 운율 복제) | instruct(말투 지시문 + 화자 음색만) | cross_lingual(프롬프트 없이 음색만).
-# 지시문은 후보 여러 개를 40문장 CER·F0·에너지 변동으로 골랐다 (calm: 중국어 지시문이 CER 최저).
+# 지시문은 중국어·영어로 둔다. 한국어 지시문은 모델이 본문처럼 읽어 버린다 (2026-10-12, 40문장 CER 1.0 이상).
 # text 는 zero_shot 이면 프롬프트 전사, instruct 이면 지시문이다 (모두 <|endofprompt|> 포함).
 PRESETS: dict[str, dict] = {
-    "bright": {"label": "밝게 (기존)", "wav": WAV_Z, "mode": "zero_shot", "text": PROMPT_TEXT},
-    "calm": {"label": "차분하게", "wav": WAV_Z, "mode": "instruct",
+    "calm": {"label": "차분하게", "wav": KO_WAV_A, "mode": "instruct",
              "text": SYS + " 请用温柔、平静的语气，非常轻声、缓慢地说话。<|endofprompt|>"},
-    # 톤 프리셋(자동 톤 선택용, 같은 화자). 지시문 후보를 16문장 CER·F0·에너지 변동으로 골랐다 (STATE 참고)
-    "comfort": {"label": "위로하는", "wav": WAV_Z, "mode": "instruct",
+    # 톤 프리셋(자동 톤 선택용, 같은 화자)
+    "comfort": {"label": "위로하는", "wav": KO_WAV_A, "mode": "instruct",
                 "text": SYS + " 请用温柔、体贴的语气，轻轻地、慢慢地说话。<|endofprompt|>"},
-    "warm": {"label": "따뜻하게", "wav": WAV_Z, "mode": "instruct",
+    "warm": {"label": "따뜻하게", "wav": KO_WAV_A, "mode": "instruct",
              "text": SYS + " 请用温和、愉快的语气，自然地说话，声音温暖而不夸张。<|endofprompt|>"},
-    "steady": {"label": "차분하고 단단하게", "wav": WAV_Z, "mode": "instruct",
+    "steady": {"label": "차분하고 단단하게", "wav": KO_WAV_A, "mode": "instruct",
                "text": SYS + " Please speak in a calm, low, steady voice, slowly and gently.<|endofprompt|>"},
+    "ko_a": {"label": "한국어 참조 A (운율 복제)", "wav": KO_WAV_A, "mode": "zero_shot", "text": KO_TEXT_A},
+    "ko_b": {"label": "한국어 참조 B (운율 복제)", "wav": KO_WAV_B, "mode": "zero_shot", "text": KO_TEXT_B},
+    # A/B 비교용: 기존 중국어 참조 + 중국어 지시문
+    "zh_calm": {"label": "차분하게 (기존 중국어 참조)", "wav": WAV_Z, "mode": "instruct",
+                "text": SYS + " 请用温柔、平静的语气，非常轻声、缓慢地说话。<|endofprompt|>"},
 }
 DEFAULT_VOICE = os.environ.get("CV_VOICE", "calm")
 if DEFAULT_VOICE not in PRESETS:
     DEFAULT_VOICE = "calm"
-
-log = logging.getLogger("cosyvoice-server")
 
 
 def _fast_ras_sampling(scores, decoded_tokens, sampling, top_p=0.8, top_k=25, win_size=10, tau_r=0.1):
