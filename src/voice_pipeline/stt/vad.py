@@ -4,6 +4,9 @@
 - is_speech_detected(): 음성이 감지되는 동안 True. False→True 전환 순간을 SpeechStart로 쓴다
   (barge-in용, 구간이 끝나기를 기다리지 않는다).
 - empty()/front/pop(): min_silence_ms 무음 뒤 구간이 끝나면 큐에 쌓인다 → SpeechEnd.
+- VoiceOnset: sherpa-onnx는 프레임별 확률을 내주지 않는다 (is_speech_detected는 min_speech 이후에야 True).
+  그래서 에너지 휴리스틱을 쓴다: 윈도 RMS가 "배경 잡음 추정치 x ONSET_RATIO" 와 절대 하한을 모두 넘는
+  윈도가 ONSET_WINDOWS(3, 약 96ms)개 이어지면 방출한다. 잡음일 수 있으므로 판단 보류용으로만 쓴다.
 시각은 지금까지 feed한 오디오 길이(ms) 기준이다.
 """
 
@@ -27,7 +30,19 @@ class SpeechEnd:
     pcm16: bytes
 
 
-VADEvent = SpeechStart | SpeechEnd
+@dataclass
+class VoiceOnset:
+    """말소리 시작 의심 (SpeechStart보다 빠른 에너지 신호). barge-in에는 쓰지 않는다."""
+
+    t_ms: float
+
+
+VADEvent = SpeechStart | SpeechEnd | VoiceOnset
+
+ONSET_WINDOWS = 3        # 연속 윈도 수 (512샘플 = 32ms -> 약 96ms)
+ONSET_RATIO = 3.0        # 잡음 추정치 대비 배수 (약 +10 dB)
+ONSET_MIN_RMS = 0.01     # 절대 하한 (약 -40 dBFS)
+NOISE_INIT = 0.003
 
 
 class VADSegmenter:
@@ -67,6 +82,10 @@ class VADSegmenter:
         self._buf = np.zeros(0, dtype=np.int16)  # 최근 오디오 (pre-roll용)
         self._buf_start = 0  # _buf[0]의 절대 샘플 위치
         self._speaking = False
+        self._noise = NOISE_INIT  # 배경 잡음 RMS 추정치 (조용한 윈도에서만 갱신)
+        self._loud_run = 0
+        self._quiet_run = 0
+        self._onset_sent = False
 
     def _ms(self, samples: int) -> float:
         return samples * 1000.0 / SAMPLE_RATE
@@ -85,9 +104,11 @@ class VADSegmenter:
         for i in range(0, n, self.window):
             self._vad.accept_waveform(f32[i : i + self.window])
             self._fed += self.window
+            self._onset_check(f32[i : i + self.window], events)
             det = self._vad.is_speech_detected()
             if det and not self._speaking:
                 self._speaking = True
+                self._onset_sent = True
                 events.append(SpeechStart(self._ms(self._fed)))
             while not self._vad.empty():
                 seg = self._vad.front
@@ -95,8 +116,28 @@ class VADSegmenter:
                 self._vad.pop()
                 events.append(self._end_event(start, len(samples), pcm, i))
                 self._speaking = False
+                self._onset_sent = False
         self._append(pcm)
         return events
+
+    def _onset_check(self, w: np.ndarray, events: list[VADEvent]) -> None:
+        """윈도 에너지로 VoiceOnset을 낸다. 구간 밖(말하는 중이 아닐 때)에서만 본다."""
+        if self._speaking:
+            self._loud_run = 0
+            return
+        rms = float(np.sqrt(np.mean(w * w)))
+        if rms > max(self._noise * ONSET_RATIO, ONSET_MIN_RMS):
+            self._loud_run += 1
+            self._quiet_run = 0
+            if self._loud_run >= ONSET_WINDOWS and not self._onset_sent:
+                self._onset_sent = True
+                events.append(VoiceOnset(self._ms(self._fed)))
+            return
+        self._loud_run = 0
+        self._quiet_run += 1
+        self._noise = 0.95 * self._noise + 0.05 * max(rms, 1e-4)
+        if self._quiet_run >= 5:  # 조용해졌다. 다음 온셋을 다시 낼 수 있다
+            self._onset_sent = False
 
     def _append(self, pcm: np.ndarray) -> None:
         self._buf = np.concatenate([self._buf, pcm])

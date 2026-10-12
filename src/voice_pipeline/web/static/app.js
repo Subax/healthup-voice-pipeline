@@ -15,7 +15,10 @@ const latRows = {};
 function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 
 // ---------- UI ----------
+// 턴 종료 판단 배지 (smart 모드). 확정 뒤 첫 avatar_state가 오면 풀린다
+let epBadge = null;
 function setBadge() {
+  if (epBadge) { $("badge").textContent = epBadge.text; $("badge").className = "badge " + epBadge.cls; return; }
   const st = speakingLocal && lastState !== "safety" ? "speaking" : lastState;
   const names = { listening: "듣는 중", thinking: "생각 중", speaking: "말하는 중", safety: "안전 안내" };
   $("badge").textContent = names[st] || st;
@@ -34,8 +37,44 @@ function setLatency(turn_id, upd) {
   for (const k in upd) if (upd[k] != null) tr[k] = upd[k]; // 늦게 오는 값(playback_start)만 채운다
   let tr_el = latRows[turn_id];
   if (!tr_el) { tr_el = latRows[turn_id] = document.createElement("tr"); $("lat").prepend(tr_el); }
-  const cells = [`#${turn_id}`, tr.stt_ms, tr.llm_first_token, tr.first_chunk, tr.backchannel, tr.tts_first_audio, tr.playback_start];
+  const cells = [`#${turn_id}`, tr.stt_ms, tr.turn_confirmed, tr.llm_first_token, tr.first_chunk, tr.backchannel, tr.tts_first_audio, tr.playback_start];
   tr_el.innerHTML = cells.map((c, i) => `<td>${i ? fmt(c) : c}</td>`).join("");
+}
+
+// ---------- 턴 종료 판단 (smart) ----------
+const EP_LABEL = { waiting: "듣는 중", resumed: "말 이어짐", reopened: "말 이어짐", confirmed: "턴 확정", dropped: "턴 버림" };
+let ep = null, epRaf = 0;   // 현재 대기: {total, base, t0}
+function epTick() {
+  if (!ep) return;
+  const left = Math.max(0, ep.total - (ep.base + performance.now() - ep.t0));
+  $("epFill").style.width = (ep.total ? (left / ep.total) * 100 : 0) + "%";
+  $("epWait").textContent = `남은 대기 ${Math.round(left)}ms / ${ep.total}ms`;
+  epRaf = left > 0 ? requestAnimationFrame(epTick) : 0;
+}
+function onTurnEval(m) {
+  const label = EP_LABEL[m.stage] || m.stage;
+  if (m.stage === "reopened") {  // 확정했던 턴의 말풍선에 취소선을 긋는다. 이어 붙인 전사는 새 말풍선으로 온다
+    const us = document.querySelectorAll("#log .msg.user");
+    if (us.length) us[us.length - 1].classList.add("merged");
+  }
+  const p = m.smart_turn_p == null ? "-" : m.smart_turn_p.toFixed(2);
+  const e = m.ending || {};
+  $("epCard").hidden = false;
+  $("epP").textContent = `Smart Turn p ${p}`;
+  $("epEnd").textContent = `어미 ${e.category || "-"} ${e.morph ? "'" + e.morph + "'" : ""}`;
+  $("epStt").textContent = `STT ${fmt(m.stt_ms)}ms${m.stt_punct ? " (문장부호)" : ""}`;
+  cancelAnimationFrame(epRaf);
+  if (m.stage === "waiting") {
+    ep = { total: m.wait_ms, base: m.since_pause_ms, t0: performance.now() };
+    epTick();
+  } else {
+    ep = null; $("epFill").style.width = "0";
+    $("epWait").textContent = m.stage === "resumed" ? "대기 취소 (말 이어짐)" : m.stage === "reopened" ? "확정 취소 (이어 붙임)" : m.stage === "confirmed" ? "확정" : "버림";
+  }
+  epBadge = m.stage === "dropped" ? null
+    : { text: `${label} (사유: ${m.reason})`, cls: m.stage === "confirmed" ? "thinking" : "listening" };
+  setBadge();
+  addMsg("judge", `[판단] ${label} — ${m.reason} · ST ${p} · "${m.text}"`);
 }
 
 // ---------- 재생 (브라우저가 Unreal 역할) ----------
@@ -131,6 +170,12 @@ function onHello(m) {
     e.textContent = (o.label || o.id) + (o.available ? "" : " (없음)"); ss.appendChild(e); });
   if (m.stt) ss.value = m.stt;
   $("sttWrap").hidden = opts.length === 0;
+  const eo = m.endpoint_options || [], es = $("endpoint");
+  es.textContent = "";
+  eo.forEach((o) => { const e = document.createElement("option"); e.value = o.id; e.textContent = o.label || o.id; es.appendChild(e); });
+  if (m.endpoint) es.value = m.endpoint;
+  $("epWrap").hidden = eo.length === 0;
+  $("epCard").hidden = true; epBadge = null; ep = null;
   if (m.backchannel != null) $("backchannel").checked = m.backchannel;
 }
 function onMessage(ev) {
@@ -140,9 +185,11 @@ function onMessage(ev) {
     case "hello": onHello(m); break;
     case "stt_ready": $("stt").value = m.stt; $("err").textContent = ""; break;
     case "retranscript": addMsg("alt", `다시 인식 [${m.stt} ${fmt(m.stt_ms)}ms] ${m.text || "(빈 결과)"}`); break;
-    case "avatar_state": lastState = m.state; setBadge(); break;
+    case "turn_eval": onTurnEval(m); break;
+    case "endpoint_ready": $("endpoint").value = m.endpoint; epBadge = null; ep = null; $("epCard").hidden = true; setBadge(); break;
+    case "avatar_state": epBadge = null; lastState = m.state; setBadge(); break;
     case "vad": $("vad").classList.toggle("on", m.speaking); break;
-    case "transcript": addMsg("user", m.text + (m.emotion || m.event ? `  [${[m.emotion, m.event].filter(Boolean).join(", ")}]` : "") +
+    case "transcript": addMsg("user", (m.utt_id != null ? `#${m.utt_id} ` : "") + m.text + (m.emotion || m.event ? `  [${[m.emotion, m.event].filter(Boolean).join(", ")}]` : "") +
       (m.stt ? `  [${m.stt} ${fmt(m.stt_ms)}ms]` : "") +
       (m.tone ? `  [톤 ${m.tone}]` : "")); break;
     case "assistant_delta":
@@ -213,11 +260,12 @@ function stopAll() {
   const old = ws; ws = null;   // onclose가 상태 표시를 덮어쓰지 않게 먼저 뗀다
   if (old) old.onmessage = null; // 중지 뒤 늦게 오는 avatar_state가 「중지됨」을 덮지 않게 한다
   setTimeout(() => { try { old.close(); } catch (e) {} }, 200); // stop 메시지가 나간 뒤 닫는다
-  lastState = "listening"; setRunning(false);
+  lastState = "listening"; epBadge = null; ep = null; setRunning(false);
   $("badge").textContent = "중지됨"; $("badge").className = "badge";
 }
 $("start").onclick = () => (running ? stopAll() : start());
 $("stopAnswer").onclick = () => send({ type: "stop" });
+$("endpoint").onchange = () => send({ type: "config", endpoint: $("endpoint").value });
 $("stt").onchange = () => send({ type: "config", stt: $("stt").value });
 $("retry").onclick = () => send({ type: "retranscribe" });
 $("voice").onchange = () => send({ type: "config", voice: $("voice").value });

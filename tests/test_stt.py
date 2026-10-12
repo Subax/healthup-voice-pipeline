@@ -66,6 +66,30 @@ def test_vad_noise_and_odd_chunk_sizes():
     vad.reset()
 
 
+@need_vad
+def test_vad_voice_onset_before_speech_start():
+    from voice_pipeline.stt.vad import VoiceOnset
+    vad = VADSegmenter(str(VAD_MODEL))
+    t = np.arange(16000 * 2) / 16000
+    tone = (6000 * np.sin(2 * np.pi * 200 * t) * (1 + np.sin(2 * np.pi * 4 * t)) / 2).astype(np.int16)
+    ev = _feed_all(vad, bytes(16000 * 2 * 1))          # 1초 무음: 온셋 없음
+    assert ev == []
+    ev = _feed_all(vad, tone[:16000 // 2].tobytes())   # 0.5초 큰 소리
+    onsets = [e for e in ev if isinstance(e, VoiceOnset)]
+    assert len(onsets) == 1 and 1000 < onsets[0].t_ms <= 1000 + 200   # 약 100ms 안에 온다
+    starts = [e for e in ev if type(e).__name__ == "SpeechStart"]
+    assert not starts or onsets[0].t_ms <= starts[0].t_ms
+
+
+@need_vad
+def test_vad_single_click_is_not_onset():
+    from voice_pipeline.stt.vad import VoiceOnset
+    vad = VADSegmenter(str(VAD_MODEL))
+    pcm = np.zeros(16000, dtype=np.int16)
+    pcm[8000:8200] = 20000                             # 짧은 클릭
+    assert not [e for e in _feed_all(vad, pcm.tobytes()) if isinstance(e, VoiceOnset)]
+
+
 def _load_ko() -> bytes:
     sys.path.insert(0, str(ROOT / "bench"))
     from stt_bench import load_wav_16k

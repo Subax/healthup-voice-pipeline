@@ -362,3 +362,158 @@ async def test_fixed_voice_ignores_emotion():
         await ws.close()
     finally:
         await c.close()
+
+
+async def _smart_client(tmp_path, stt_text="힘들어요", scorer_p=0.9):
+    from voice_pipeline.endpoint.smart_turn import MockEndpointScorer
+    eng = Engines(MockLLM(ttft_ms=20, tokens_per_s=400), MockTTS(first_audio_ms=10, rtf=0.5),
+                  MockSTT(stt_text), lambda: EnergyVAD(min_silence_ms=100), {"llm": "mock", "tts": "mock", "stt": "mock"},
+                  endpoint_log_dir=tmp_path)
+    eng.endpoint_scorer = MockEndpointScorer(scorer_p)
+    c = TestClient(TestServer(create_app(eng)))
+    await c.start_server()
+    return c
+
+
+async def test_smart_mode_end_to_end(tmp_path):
+    c = await _smart_client(tmp_path, "그랬는데")
+    try:
+        ws = await c.ws_connect("/ws")
+        hello = await recv(ws)
+        assert hello["endpoint"] == "smart" and [o["id"] for o in hello["endpoint_options"]] == ["smart", "fixed"]
+        msgs: list = []
+        for _ in range(5):
+            await ws.send_bytes(LOUD * 2)
+        for _ in range(10):
+            await ws.send_bytes(QUIET)
+        done = await until(ws, is_type("turn_done"), msgs)
+        ds = [m for m in msgs if isinstance(m, dict)]
+        evals = [m for m in ds if m["type"] == "turn_eval"]
+        assert [e["stage"] for e in evals] == ["waiting", "confirmed"] and evals[0]["rule_id"] == "EC" and evals[0]["wait_ms"] == 650
+        tr = next(m for m in ds if m["type"] == "transcript")
+        assert tr["utt_id"] == evals[0]["utt_id"] == done["utt_id"] and tr["text"] == "그랬는데"
+        assert tr["turn_id"] == done["turn_id"]
+        assert [m["type"] for m in ds].index("turn_eval") < [m["type"] for m in ds].index("transcript")
+        t = done["trace"]
+        assert t["turn_confirmed"] is not None and t["turn_confirmed"] >= 600 and t["stt_final"] <= t["turn_confirmed"]
+        assert list(tmp_path.glob("*.jsonl"))
+        await ws.close()
+    finally:
+        await c.close()
+
+
+async def test_endpoint_config_switch_to_fixed(tmp_path):
+    c = await _smart_client(tmp_path)
+    try:
+        ws = await c.ws_connect("/ws")
+        await recv(ws)
+        await ws.send_json({"type": "config", "endpoint": "fixed"})
+        assert (await until(ws, is_type("endpoint_ready"), []))["endpoint"] == "fixed"
+        for _ in range(5):
+            await ws.send_bytes(LOUD * 2)
+        for _ in range(10):
+            await ws.send_bytes(QUIET)
+        msgs: list = []
+        done = await until(ws, is_type("turn_done"), msgs)
+        assert not any(isinstance(m, dict) and m["type"] == "turn_eval" for m in msgs)
+        assert done["utt_id"] == 1 and done["trace"]["turn_confirmed"] is not None
+        await ws.close()
+    finally:
+        await c.close()
+
+
+# ---------- 확정 직후 다시 말함 (reopen) ----------
+
+class SeqSTT:
+    """호출마다 texts를 차례로 돌려준다."""
+
+    sample_rate = 16000
+
+    def __init__(self, texts):
+        self.texts = list(texts)
+
+    async def warmup(self):
+        return None
+
+    async def transcribe(self, pcm16):
+        from voice_pipeline.web.mocks import MockSTTResult
+        return MockSTTResult(self.texts.pop(0) if self.texts else "", elapsed_ms=1.0)
+
+
+class RecLLM(MockLLM):
+    """LLM이 받은 messages를 기록한다."""
+
+    def __init__(self):
+        super().__init__(ttft_ms=20, tokens_per_s=400)
+        self.calls: list[list[dict]] = []
+
+    async def stream(self, messages, turn_id):
+        self.calls.append([dict(m) for m in messages])
+        async for ev in super().stream(messages, turn_id=turn_id):
+            yield ev
+
+
+async def _reopen_client(tmp_path, tts_first_ms):
+    from voice_pipeline.endpoint.smart_turn import MockEndpointScorer
+    llm = RecLLM()
+    eng = Engines(llm, MockTTS(first_audio_ms=tts_first_ms, rtf=0.5), SeqSTT(["그랬는데", "힘들었어요"]),
+                  lambda: EnergyVAD(min_silence_ms=100), {"llm": "mock", "tts": "mock", "stt": "mock"},
+                  endpoint_log_dir=tmp_path)
+    eng.endpoint_scorer = MockEndpointScorer(0.9)
+    c = TestClient(TestServer(create_app(eng)))
+    await c.start_server()
+    return c, llm
+
+
+async def _speak_and_pause(ws):
+    for _ in range(5):
+        await ws.send_bytes(LOUD * 2)
+    for _ in range(10):
+        await ws.send_bytes(QUIET)
+
+
+async def test_reopen_after_confirm_before_tts_audio(tmp_path):
+    c, llm = await _reopen_client(tmp_path, tts_first_ms=3000)
+    try:
+        ws = await c.ws_connect("/ws")
+        await recv(ws)
+        await _speak_and_pause(ws)
+        msgs: list = []
+        await until(ws, lambda m: isinstance(m, dict) and m["type"] == "turn_eval" and m["stage"] == "confirmed", msgs)
+        await asyncio.sleep(0.2)               # 본 응답 소리는 아직 없다 (TTS 3초)
+        for _ in range(3):
+            await ws.send_bytes(LOUD * 2)      # 다시 말한다
+        re = await until(ws, lambda m: isinstance(m, dict) and m["type"] == "turn_eval" and m["stage"] == "reopened", msgs)
+        assert "이어 붙임" in re["reason"] and re["text"] == "그랬는데"
+        for _ in range(5):
+            await ws.send_bytes(LOUD * 2)
+        for _ in range(10):
+            await ws.send_bytes(QUIET)
+        done = await until(ws, lambda m: isinstance(m, dict) and m["type"] == "turn_done" and not m["interrupted"], msgs)
+        tr = [m for m in msgs if isinstance(m, dict) and m["type"] == "transcript"]
+        assert tr[-1]["text"] == "그랬는데 힘들었어요" and tr[-1]["utt_id"] == re["utt_id"] == done["utt_id"]
+        users = [m for m in llm.calls[-1] if m["role"] == "user"]
+        assert [m["content"] for m in users] == ["그랬는데 힘들었어요"]   # 고아 user 메시지 없음
+        assert not any(m["role"] == "assistant" for m in llm.calls[-1])
+        log = "".join(f.read_text(encoding="utf-8") for f in tmp_path.glob("*.jsonl"))
+        assert '"stage": "reopened"' in log
+        await ws.close()
+    finally:
+        await c.close()
+
+
+async def test_no_reopen_after_tts_audio_started(tmp_path):
+    c, _ = await _reopen_client(tmp_path, tts_first_ms=10)
+    try:
+        ws = await c.ws_connect("/ws")
+        await recv(ws)
+        await _speak_and_pause(ws)
+        msgs: list = []
+        await until(ws, lambda m: isinstance(m, tuple), msgs)   # 본 응답 첫 프레임
+        for _ in range(3):
+            await ws.send_bytes(LOUD * 2)
+        await until(ws, is_type("interrupt"), msgs)
+        assert not any(isinstance(m, dict) and m.get("stage") == "reopened" for m in msgs)
+        await ws.close()
+    finally:
+        await c.close()

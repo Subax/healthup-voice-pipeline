@@ -1,7 +1,16 @@
 """브라우저 탭 하나의 대화 세션: 마이크 → VAD → STT → VoicePipeline → 브라우저 재생.
 
-SPEECH_END 시각은 VAD가 발화 끝을 확정한 순간(SpeechEnd 수신)에 세션이 먼저 찍는다.
+턴 종료 방식 (세션마다 `endpoint_mode`):
+- smart: VAD 멈춤(200ms)마다 TurnEndpointer가 STT·Smart Turn·Kiwi 어미로 대기 시간을 정한다.
+- fixed: VAD 무음 vad_silence_ms(500) 뒤 바로 턴을 확정한다 (이전 동작).
+
+SPEECH_END 시각은 두 방식 모두 "실제 발화 끝"이다.
+smart는 마지막 멈춤의 시작 시각, fixed는 VAD 방출 시각 - vad_silence_ms 이다.
+(이전에는 fixed의 SPEECH_END가 VAD 방출 시각이라 약 500ms 늦었다. 두 방식의 지연을 같은 기준으로 비교하려고 맞췄다.)
+TURN_CONFIRMED는 턴이 확정된 시각이다. fixed에서는 VAD 방출 시각이다.
 TurnTrace.mark는 같은 이름의 첫 시각만 남기므로, 파이프라인이 나중에 다시 찍어도 이 시각이 이긴다.
+id: 사용자 발화마다 utt_id (세션 카운터). 파이프라인 turn_id는 respond()에서 나중에 정해지므로
+transcript와 turn_done에 둘 다 싣는다 (transcript의 turn_id는 곧 할당될 값).
 """
 
 from __future__ import annotations
@@ -9,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, AsyncIterator
 
 from aiohttp import web
@@ -18,7 +28,8 @@ from ..llm.events import LLMClient, LLMEvent, Token
 from ..chunker import SemanticChunker
 from ..pipeline import VoicePipeline
 from ..trace import (BACKCHANNEL, FIRST_CHUNK, LLM_FIRST_TOKEN, PLAYBACK_START, SPEECH_END, STT_FINAL,
-                     TTS_FIRST_AUDIO, TurnTrace)
+                     TTS_FIRST_AUDIO, TURN_CONFIRMED, TurnTrace)
+from ..endpoint.turn import ConfirmedTurn, TurnEndpointer
 from ..tone import AUTO, CALM, extract_features, pick_tone
 from .engines import Engines
 
@@ -26,7 +37,12 @@ log = logging.getLogger("voice_pipeline.web")
 
 AUTO_LABEL = "자동 (사용자 말투에 맞춤)"
 
-TRACE_MARKS = {"stt_final": STT_FINAL, "llm_first_token": LLM_FIRST_TOKEN, "first_chunk": FIRST_CHUNK,
+PAUSE_SILENCE_MS = 200   # smart 모드 VAD 최소 무음 (짧은 멈춤까지 알린다)
+RESUME_MERGE_MS = 1500   # 확정 직후 이 시간 안에 다시 말하면(본 응답 소리 전) 같은 턴으로 이어 붙인다
+ENDPOINT_OPTIONS = [{"id": "smart", "label": "어미+운율 (Smart Turn·Kiwi)"},
+                    {"id": "fixed", "label": "고정 무음 500ms"}]
+
+TRACE_MARKS = {"stt_final": STT_FINAL, "turn_confirmed": TURN_CONFIRMED, "llm_first_token": LLM_FIRST_TOKEN, "first_chunk": FIRST_CHUNK,
                "backchannel": BACKCHANNEL, "tts_first_audio": TTS_FIRST_AUDIO, "playback_start": PLAYBACK_START}
 
 
@@ -52,18 +68,36 @@ class DemoSession:
                                       chunker_factory=lambda: SemanticChunker(first_min=first_min))
         self._pipeline_listener = self.sink.playback_listener
         self.sink.playback_listener = self._on_playback
-        self.vad = engines.make_vad()
+        self._utt_seq = 0                   # 사용자 발화 번호
+        self.endpoint_mode = engines.endpoint_default if engines.endpoint_default in ("smart", "fixed") else "smart"
+        self.vad = self._new_vad()
+        self.endpointer = TurnEndpointer(
+            lambda: self._stt(), engines.endpoint_scorer, self._emit_turn_eval, self._on_turn_confirmed,
+            stt_id=lambda: self.stt_id, mode=lambda: self.endpoint_mode, log_dir=engines.endpoint_log_dir,
+            utt_id_factory=self._next_utt)
         self.barge_in_enabled = True
         self.backchannel_enabled = engines.backchannel is not None
         self._task: asyncio.Task | None = None
         self._stage: str | None = None      # "stt" | "respond" | None
         self._bg: set[asyncio.Task] = set()
+        self._last_confirm: dict | None = None  # smart 확정 직후 상태: turn, t, trace, hl(history 길이)
         self._muted = False                 # 반이중 중 마이크 무시 상태
         self._closed = False
         self.stt_id = engines.stt_id        # STT 선택은 세션마다
         self._stt_switch: asyncio.Task | None = None
         self._last_pcm: bytes | None = None  # 마지막 마이크 발화 (다시 인식용)
         self.voice_auto = True              # 목소리 선택이 auto 인가 (TTS 목록이 있어야 실제로 켜진다)
+
+    def _next_utt(self) -> int:
+        self._utt_seq += 1
+        return self._utt_seq
+
+    def _new_vad(self) -> Any:
+        """모드에 맞는 VAD. smart는 짧은 멈춤(200ms)까지 알린다."""
+        return self.engines.new_vad(PAUSE_SILENCE_MS if self.endpoint_mode == "smart" else None)
+
+    async def _emit_turn_eval(self, ev: dict) -> None:
+        await self.send(ev)
 
     def _voice_ids(self) -> set[str]:
         return {v.get("id") for v in (getattr(self.engines.tts, "voices", None) or [])}
@@ -89,7 +123,8 @@ class DemoSession:
                          "backchannel": self.backchannel_enabled,
                          "first_min": self.engines.first_min, "vad_silence_ms": self.engines.vad_silence_ms,
                          "voices": voices, "voice": voice,
-                         "stt_options": self.engines.stt_options(), "stt": self.stt_id})
+                         "stt_options": self.engines.stt_options(), "stt": self.stt_id,
+                         "endpoint": self.endpoint_mode, "endpoint_options": ENDPOINT_OPTIONS})
 
     async def _on_token(self, turn_id: int, text: str) -> None:
         await self.send({"type": "assistant_delta", "turn_id": turn_id, "text": text})
@@ -133,12 +168,25 @@ class DemoSession:
             if kind == "SpeechStart":
                 await self.send({"type": "vad", "speaking": True})
                 # 최소 구현. TODO: 맞장구(네, 음) 필터는 범위 밖이다. 지금은 어떤 발화든 끊는다.
+                if self.endpoint_mode == "smart":
+                    await self._maybe_reopen()
                 if self._busy():
                     await self._stop_current()
+                if self.endpoint_mode == "smart":
+                    await self.endpointer.on_speech_start()
+            elif kind == "VoiceOnset":  # SpeechStart보다 빠른 신호: 대기 타이머만 멈춘다 (barge-in 아님)
+                if self.endpoint_mode == "smart":
+                    await self._maybe_reopen()
+                    await self.endpointer.on_voice_onset()
             elif kind == "SpeechEnd":
                 await self.send({"type": "vad", "speaking": False})
+                now = time.monotonic()
+                if self.endpoint_mode == "smart":  # 판단·확정은 TurnEndpointer가 한다
+                    await self.endpointer.on_pause(ev.pcm16, now - PAUSE_SILENCE_MS / 1000)
+                    continue
                 trace = TurnTrace(0)
-                trace.mark(SPEECH_END)
+                trace.mark(SPEECH_END, now - self.engines.vad_silence_ms / 1000)  # 실제 발화 끝
+                trace.mark(TURN_CONFIRMED, now)
                 await self._start_turn(trace, pcm16=ev.pcm16)
 
     async def on_json(self, raw: str) -> None:
@@ -152,8 +200,10 @@ class DemoSession:
         elif kind == "text_input":
             text = str(msg.get("text", "")).strip()
             if text:
+                self._last_confirm = None
                 trace = TurnTrace(0)
                 trace.mark(SPEECH_END)
+                trace.mark(TURN_CONFIRMED)
                 await self._start_turn(trace, text=text)
         elif kind == "config":
             if "barge_in" in msg:
@@ -168,6 +218,13 @@ class DemoSession:
                 elif voice in self._voice_ids():
                     self.voice_auto = False
                     self.engines.tts.voice = voice
+            ep = msg.get("endpoint")
+            if ep in ("smart", "fixed") and ep != self.endpoint_mode:
+                self.endpointer.reset()  # 대기 중이던 턴은 버린다
+                self._last_confirm = None
+                self.endpoint_mode = ep
+                self.vad = self._new_vad()
+                await self.send({"type": "endpoint_ready", "endpoint": ep})
             stt_id = msg.get("stt")
             if isinstance(stt_id, str) and stt_id:
                 await self._switch_stt(stt_id)
@@ -234,11 +291,43 @@ class DemoSession:
         if running:
             await asyncio.wait({t})
 
-    async def _start_turn(self, trace: TurnTrace, *, pcm16: bytes | None = None, text: str | None = None) -> None:
+    async def _on_turn_confirmed(self, turn: ConfirmedTurn) -> None:
+        """smart: 턴이 확정됐다. 이미 아는 전사로 응답 경로를 시작한다 (STT 생략)."""
+        trace = TurnTrace(0)
+        trace.mark(SPEECH_END, turn.pause_start)
+        trace.mark(STT_FINAL, turn.stt_done)
+        trace.mark(TURN_CONFIRMED, turn.confirm_time)
+        self._last_pcm = turn.pcm16
+        self._last_confirm = {"turn": turn, "t": time.monotonic(), "trace": trace, "hl": None}
+        await self._start_turn(trace, pcm16=turn.pcm16, text=turn.text, known=turn)
+
+    async def _maybe_reopen(self) -> bool:
+        """확정 직후(RESUME_MERGE_MS 안) 본 응답 소리 전에 다시 말하면 판단을 버리고 턴을 이어 붙인다."""
+        lc = self._last_confirm
+        if lc is None:
+            return False
+        if (time.monotonic() - lc["t"]) * 1000 > RESUME_MERGE_MS or TTS_FIRST_AUDIO in lc["trace"].marks:
+            self._last_confirm = None  # 늦었다. 일반 barge-in 경로
+            return False
+        self._last_confirm = None
+        await asyncio.sleep(0)  # 응답 작업이 시작할 기회를 준다 (history 길이를 기록한다)
+        await self._stop_current()
+        hist, hl, turn = self.pipeline.history, lc["hl"], lc["turn"]
+        if hl is not None:
+            del hist[hl:]  # 이 턴의 user 메시지와 부분 assistant 메시지를 지운다
+        elif hist and hist[-1].get("role") == "user" and hist[-1].get("content") == turn.text:
+            hist.pop()
+        await self.send({"type": "avatar_state", "state": "listening"})
+        await self.endpointer.reopen(turn)
+        return True
+
+    async def _start_turn(self, trace: TurnTrace, *, pcm16: bytes | None = None, text: str | None = None,
+                          known: ConfirmedTurn | None = None) -> None:
         await self._stop_current()
         if self._closed:
             return
-        self._task = asyncio.create_task(self._run_turn(trace, pcm16, text))
+        utt_id = known.utt_id if known is not None else self._next_utt()
+        self._task = asyncio.create_task(self._run_turn(trace, pcm16, text, utt_id, known))
 
     def _apply_tone(self, emotion: str | None, pcm16: bytes | None, text: str) -> str:
         """auto: 감정·음향 특징으로 톤을 골라 이번 턴의 TTS 목소리로 쓴다. 서버에 없는 톤이면 calm."""
@@ -249,12 +338,16 @@ class DemoSession:
         self.engines.tts.voice = tone  # 엔진은 공유다. 탭 하나만 쓴다는 전제
         return tone
 
-    async def _run_turn(self, trace: TurnTrace, pcm16: bytes | None, text: str | None) -> None:
+    async def _run_turn(self, trace: TurnTrace, pcm16: bytes | None, text: str | None, utt_id: int,
+                        known: ConfirmedTurn | None = None) -> None:
         stt_ms, emotion, event = 0.0, None, None
         stt_id = self.stt_id
         try:
             self._stage = "stt"
-            if pcm16 is not None:
+            if known is not None:  # 전사는 TurnEndpointer가 끝냈다
+                stt_id, stt_ms = known.stt_id, known.stt_ms
+                emotion, event = getattr(known.last, "emotion", None), getattr(known.last, "event", None)
+            elif pcm16 is not None:
                 self._last_pcm = pcm16
                 r = await self._stt().transcribe(pcm16)
                 text, stt_ms = (r.text or "").strip(), float(r.elapsed_ms)
@@ -263,7 +356,10 @@ class DemoSession:
             if not text:
                 return
             tone = self._apply_tone(emotion, pcm16, text) if self._auto_active() else None
-            await self.send({"type": "transcript", "text": text, "stt": stt_id, "stt_ms": round(stt_ms, 1),
+            if known is not None and self._last_confirm is not None and self._last_confirm["turn"] is known:
+                self._last_confirm["hl"] = len(self.pipeline.history)
+            await self.send({"type": "transcript", "utt_id": utt_id, "turn_id": self.pipeline.guard.current + 1,
+                             "text": text, "stt": stt_id, "stt_ms": round(stt_ms, 1),
                              "emotion": emotion, "event": event, "tone": tone})
             self._stage = "respond"
             opener = None
@@ -272,7 +368,7 @@ class DemoSession:
                 picked = bank.pick(getattr(self.engines.tts, "voice", None))
                 opener = picked[1] if picked else None
             res = await self.pipeline.respond(text, trace=trace, opener=opener)
-            await self.send({"type": "turn_done", "turn_id": res.trace.turn_id,
+            await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": res.trace.turn_id,
                              "interrupted": res.interrupted, "spoken_text": res.spoken_text,
                              "trace": {"stt_ms": round(stt_ms, 1), **self._trace_ms(res.trace)}})
         except asyncio.CancelledError:
@@ -286,6 +382,7 @@ class DemoSession:
     async def close(self) -> None:
         """WS가 닫혔다. 진행 중 작업을 정리한다."""
         self._closed = True
+        self.endpointer.reset()
         try:
             await self._stop_current()
         finally:

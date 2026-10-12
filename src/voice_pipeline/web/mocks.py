@@ -15,6 +15,11 @@ class SpeechStart:
 
 
 @dataclass
+class VoiceOnset:
+    t_ms: float
+
+
+@dataclass
 class SpeechEnd:
     t_ms: float
     pcm16: bytes
@@ -68,6 +73,8 @@ class EnergyVAD:
             loud = float(np.sqrt(np.mean(x * x))) >= self.threshold
             if not self._speaking:
                 if loud:
+                    if not self._pending:
+                        events.append(VoiceOnset(t))  # 첫 큰 프레임 = 온셋
                     self._pending.append(f)
                     if len(self._pending) >= self.min_speech:
                         self._speaking, self._sil = True, 0

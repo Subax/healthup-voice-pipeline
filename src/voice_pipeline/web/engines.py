@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import asyncio
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from ..backchannel import BackchannelBank
@@ -12,6 +14,19 @@ from ..llm.events import LLMClient
 from ..stt.registry import STT_ENGINES
 from ..tts.base import TTSEngine
 from .mocks import EnergyVAD
+
+
+log = logging.getLogger("voice_pipeline.web")
+
+SMART_TURN_MODEL = Path("models/smart-turn/smart-turn-v3.2-cpu.onnx")
+
+
+def _default_scorer() -> Any:
+    """Smart Turn 모델 파일이 있으면 지연 로드 스코어러를 만든다. 없으면 None."""
+    if not SMART_TURN_MODEL.exists():
+        return None
+    from ..endpoint.smart_turn import SmartTurnScorer
+    return SmartTurnScorer(SMART_TURN_MODEL)
 
 
 @dataclass
@@ -25,6 +40,9 @@ class Engines:
     vad_silence_ms: int = 500        # 발화 끝으로 보는 무음 길이
     backchannel: BackchannelBank | None = None  # 미리 합성한 맞장구
     stt_id: str = ""                 # 기본 STT id. 비우면 labels["stt"]
+    endpoint_default: str = "smart"  # 세션 기본 턴 종료 방식: smart | fixed
+    endpoint_log_dir: Path | None = None  # 턴 종료 판단 JSONL 위치. None이면 bench/results/endpoint_log
+    endpoint_scorer: Any = None      # EndpointScorer (Smart Turn). None이면 p=None 경로
     _stt_cache: dict[str, Any] = field(default_factory=dict)
     _stt_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
 
@@ -36,6 +54,17 @@ class Engines:
     def stt(self) -> Any:
         """기본(현재) STT 엔진."""
         return self._stt_cache[self.stt_id]
+
+    def new_vad(self, min_silence_ms: int | None = None) -> Any:
+        """세션용 새 VAD. min_silence_ms를 받는 팩토리면 그 값으로, 아니면 기본값으로 만든다."""
+        if min_silence_ms is not None:
+            try:
+                params = inspect.signature(self.make_vad).parameters
+            except (TypeError, ValueError):
+                params = {}
+            if "min_silence_ms" in params or any(p.kind is p.VAR_KEYWORD for p in params.values()):
+                return self.make_vad(min_silence_ms=min_silence_ms)
+        return self.make_vad()
 
     def stt_options(self) -> list[dict[str, Any]]:
         """UI 목록. 등록부 엔진 + 이미 주입된 엔진."""
@@ -65,6 +94,13 @@ class Engines:
         return self._stt_cache[stt_id]
 
     async def warmup(self) -> None:
+        sc = self.endpoint_scorer
+        if sc is not None and hasattr(sc, "warmup"):
+            try:
+                await asyncio.to_thread(sc.warmup)  # 모델 로드는 블로킹이다
+            except Exception:
+                log.exception("Smart Turn warmup 실패: p=None으로 동작")
+                self.endpoint_scorer = None
         for e in (self.stt, self.tts, self.llm):
             fn = getattr(e, "warmup", None)
             if fn:
@@ -90,7 +126,8 @@ def _mock_reply(messages: list[dict]) -> str:
 
 
 def build_engines(llm: str = "mock", tts: str = "mock", stt: str = "mock", *,
-                  first_min: int = 2, vad_silence_ms: int = 500, backchannel: bool = True) -> Engines:
+                  first_min: int = 2, vad_silence_ms: int = 500, backchannel: bool = True,
+                  endpoint: str = "smart") -> Engines:
     labels = {"llm": llm, "tts": tts, "stt": stt}
     if llm == "vllm":
         from ..llm.openai_stream import OpenAIStreamLLM
@@ -111,6 +148,12 @@ def build_engines(llm: str = "mock", tts: str = "mock", stt: str = "mock", *,
         make_vad = EnergyVAD
     else:
         from ..stt import VADSegmenter
-        make_vad = lambda: VADSegmenter(min_silence_ms=vad_silence_ms)
-    return Engines(llm_o, tts_o, stt_o, make_vad, labels, first_min, vad_silence_ms,
-                   BackchannelBank() if backchannel else None)
+        make_vad = lambda min_silence_ms=None: VADSegmenter(min_silence_ms=min_silence_ms or vad_silence_ms)
+    eng = Engines(llm_o, tts_o, stt_o, make_vad, labels, first_min, vad_silence_ms,
+                  BackchannelBank() if backchannel else None, endpoint_default=endpoint)
+    if stt == "mock":
+        from ..endpoint.smart_turn import MockEndpointScorer
+        eng.endpoint_scorer = MockEndpointScorer(0.8)
+    else:
+        eng.endpoint_scorer = _default_scorer()
+    return eng

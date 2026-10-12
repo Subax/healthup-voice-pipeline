@@ -34,7 +34,13 @@ input[type=text] { font:inherit; padding:6px 10px; border:1px solid var(--line);
 .msg.user { align-self:flex-end; background:var(--accent); color:#fff; }
 .msg.bot { align-self:flex-start; background:var(--bg); border:1px solid var(--line); }
 .msg.cut::after { content:" (끊김)"; color:var(--bad); font-size:12px; }
+.msg.merged { text-decoration:line-through; opacity:.6; }
+.msg.merged::after { content:" (이어 붙임)"; text-decoration:none; display:inline-block; font-size:12px; }
 .msg.alt { align-self:flex-end; background:var(--line); color:var(--muted); font-size:13px; }
+.msg.judge { align-self:stretch; max-width:100%; background:none; color:var(--muted); font-size:12px; padding:0 4px; }
+.epline { display:flex; flex-wrap:wrap; gap:6px 14px; align-items:center; font-size:13px; font-variant-numeric:tabular-nums; }
+.epbar { flex:0 0 220px; height:8px; background:var(--line); border-radius:4px; overflow:hidden; }
+.epbar > div { height:100%; width:0; background:var(--warn); }
 .hint { color:var(--muted); font-size:12px; }
 table { width:100%; border-collapse:collapse; font-size:13px; font-variant-numeric:tabular-nums; }
 th, td { text-align:right; padding:3px 6px; border-bottom:1px solid var(--line); }
@@ -51,11 +57,17 @@ th { color:var(--muted); font-weight:600; }
       <span id="engines" class="hint"></span>
       <label id="voiceWrap" class="hint" hidden>목소리 <select id="voice"></select></label>
       <label id="sttWrap" class="hint" hidden>STT <select id="stt"></select></label>
+      <label id="epWrap" class="hint" hidden>턴 종료 <select id="endpoint"></select></label>
       <span id="badge" class="badge">대기</span>
       <button id="start" class="primary">시작</button>
       <button id="stopAnswer" disabled>답변 멈춤</button>
     </div>
   </header>
+
+  <section class="card wide" id="epCard" hidden>
+    <div class="epline"><div class="epbar"><div id="epFill"></div></div><span id="epWait">-</span>
+      <span id="epP">Smart Turn p -</span><span id="epEnd">어미 -</span><span id="epStt">STT -</span></div>
+  </section>
 
   <section class="card">
     <h2>마이크</h2>
@@ -84,9 +96,9 @@ th { color:var(--muted); font-weight:600; }
   <section class="card wide"><h2>대화</h2><div id="log"></div></section>
 
   <section class="card wide">
-    <h2>턴별 지연 (ms, 발화 종료 기준)</h2>
+    <h2>턴별 지연 (ms, 실제 발화 끝 기준 — 턴 종료 방식과 무관하게 같은 기준)</h2>
     <table>
-      <thead><tr><th>턴</th><th>STT</th><th>→ LLM 첫 토큰</th><th>→ 첫 청크</th><th>→ 맞장구</th><th>→ TTS 첫 오디오</th><th>→ 재생 시작</th></tr></thead>
+      <thead><tr><th>턴</th><th>STT</th><th>→ 턴 확정</th><th>→ LLM 첫 토큰</th><th>→ 첫 청크</th><th>→ 맞장구</th><th>→ TTS 첫 오디오</th><th>→ 재생 시작</th></tr></thead>
       <tbody id="lat"></tbody>
     </table>
   </section>

@@ -2,7 +2,7 @@
 
 from .base import STTEngine, STTResult
 from .sensevoice import SenseVoiceSTT
-from .vad import SpeechEnd, SpeechStart, VADEvent, VADSegmenter
+from .vad import SpeechEnd, SpeechStart, VADEvent, VADSegmenter, VoiceOnset
 
 __all__ = [
     "STTEngine",
@@ -12,4 +12,5 @@ __all__ = [
     "SpeechEnd",
     "VADEvent",
     "VADSegmenter",
+    "VoiceOnset",
 ]
