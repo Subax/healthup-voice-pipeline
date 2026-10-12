@@ -14,6 +14,8 @@ class CosyVoiceTTS:
     def __init__(self, url: str | None = None, sample_rate: int = 24000):
         self.url = (url or os.environ.get("COSYVOICE_URL") or "http://127.0.0.1:8091").rstrip("/")
         self.sample_rate = sample_rate
+        self.voice: str | None = os.environ.get("COSYVOICE_VOICE") or None  # 서버 프리셋 id (None 이면 서버 기본)
+        self.voices: list[dict] = []  # warmup() 이 /voices 에서 채운다
         self._session: aiohttp.ClientSession | None = None
         self._resp: aiohttp.ClientResponse | None = None
 
@@ -29,11 +31,19 @@ class CosyVoiceTTS:
             r.raise_for_status()
             info = await r.json()
         self.sample_rate = int(info["sample_rate"])
+        try:
+            async with session.get(f"{self.url}/voices") as r:
+                self.voices = (await r.json())["voices"] if r.status == 200 else []
+        except (aiohttp.ClientError, KeyError, ValueError):
+            self.voices = []  # 구버전 서버
 
     async def stream(self, text: str) -> AsyncIterator[bytes]:
         session = await self._ensure_session()
         carry = b""
-        async with session.post(f"{self.url}/tts", json={"text": text}) as resp:
+        body: dict = {"text": text}
+        if self.voice:
+            body["voice"] = self.voice
+        async with session.post(f"{self.url}/tts", json=body) as resp:
             resp.raise_for_status()
             self._resp = resp
             try:

@@ -15,6 +15,7 @@ from aiohttp import web
 
 from ..bridge.ws_server_sink import WebSocketServerSink
 from ..llm.events import LLMClient, LLMEvent, Token
+from ..chunker import SemanticChunker
 from ..pipeline import VoicePipeline
 from ..trace import (FIRST_CHUNK, LLM_FIRST_TOKEN, PLAYBACK_START, SPEECH_END, STT_FINAL,
                      TTS_FIRST_AUDIO, TurnTrace)
@@ -43,7 +44,9 @@ class DemoSession:
     def __init__(self, ws: web.WebSocketResponse, engines: Engines):
         self.engines = engines
         self.sink = WebSocketServerSink(ws)
-        self.pipeline = VoicePipeline(TeeLLM(engines.llm, self._on_token), engines.tts, self.sink)
+        first_min = engines.first_min
+        self.pipeline = VoicePipeline(TeeLLM(engines.llm, self._on_token), engines.tts, self.sink,
+                                      chunker_factory=lambda: SemanticChunker(first_min=first_min))
         self._pipeline_listener = self.sink.playback_listener
         self.sink.playback_listener = self._on_playback
         self.vad = engines.make_vad()
@@ -60,7 +63,11 @@ class DemoSession:
         await self.sink.send_json(obj)
 
     async def send_hello(self) -> None:
-        await self.send({"type": "hello", "engines": self.engines.labels, "barge_in": self.barge_in_enabled})
+        tts = self.engines.tts
+        voices = list(getattr(tts, "voices", None) or [])  # 목소리 목록은 TTS 어댑터가 warmup 뒤에 채운다
+        await self.send({"type": "hello", "engines": self.engines.labels, "barge_in": self.barge_in_enabled,
+                         "first_min": self.engines.first_min, "vad_silence_ms": self.engines.vad_silence_ms,
+                         "voices": voices, "voice": getattr(tts, "voice", None)})
 
     async def _on_token(self, turn_id: int, text: str) -> None:
         await self.send({"type": "assistant_delta", "turn_id": turn_id, "text": text})
@@ -129,6 +136,12 @@ class DemoSession:
         elif kind == "config":
             if "barge_in" in msg:
                 self.barge_in_enabled = bool(msg["barge_in"])
+            voice = msg.get("voice")
+            if isinstance(voice, str) and voice:
+                # 엔진은 공유다. 탭 하나만 쓴다는 전제 (README 참고)
+                ids = {v.get("id") for v in (getattr(self.engines.tts, "voices", None) or [])}
+                if voice in ids:
+                    self.engines.tts.voice = voice
         elif kind == "reset":
             await self._stop_current()
             self.pipeline.history.clear()

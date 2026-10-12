@@ -18,6 +18,8 @@ class Engines:
     stt: Any                         # transcribe(pcm16) -> STTResult
     make_vad: Callable[[], Any]      # 세션마다 새 VAD (상태가 있다)
     labels: dict[str, str]
+    first_min: int = 2               # 첫 청크 최소 글자 수
+    vad_silence_ms: int = 500        # 발화 끝으로 보는 무음 길이
 
     async def warmup(self) -> None:
         for e in (self.stt, self.tts, self.llm):
@@ -41,7 +43,8 @@ def _mock_reply(messages: list[dict]) -> str:
             "오늘 혈압은 128/82mmHg로 지난주보다 조금 높아요. 요즘 잠은 잘 주무시나요?")
 
 
-def build_engines(llm: str = "mock", tts: str = "mock", stt: str = "mock") -> Engines:
+def build_engines(llm: str = "mock", tts: str = "mock", stt: str = "mock", *,
+                  first_min: int = 2, vad_silence_ms: int = 500) -> Engines:
     labels = {"llm": llm, "tts": tts, "stt": stt}
     if llm == "vllm":
         from ..llm.openai_stream import OpenAIStreamLLM
@@ -57,7 +60,7 @@ def build_engines(llm: str = "mock", tts: str = "mock", stt: str = "mock") -> En
         tts_o = MockTTS()
     if stt == "sensevoice":
         from ..stt import SenseVoiceSTT, VADSegmenter
-        stt_o, make_vad = SenseVoiceSTT(), (lambda: VADSegmenter(min_silence_ms=500))
+        stt_o, make_vad = SenseVoiceSTT(), (lambda: VADSegmenter(min_silence_ms=vad_silence_ms))
     else:
         stt_o, make_vad = MockSTT(), EnergyVAD
-    return Engines(llm_o, tts_o, stt_o, make_vad, labels)
+    return Engines(llm_o, tts_o, stt_o, make_vad, labels, first_min, vad_silence_ms)

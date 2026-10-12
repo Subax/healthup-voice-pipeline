@@ -17,8 +17,8 @@ SPLITS = [1, 300, 701, 3, 1043]
 assert sum(SPLITS) == len(PCM)
 
 
-def make_app(forever: bool = False) -> web.Application:
-    state = {"closed": asyncio.Event()}
+def make_app(forever: bool = False, voices: bool = True) -> web.Application:
+    state = {"closed": asyncio.Event(), "bodies": []}
 
     async def info(_):
         return web.json_response({"sample_rate": 24000, "model": "fake"})
@@ -26,6 +26,7 @@ def make_app(forever: bool = False) -> web.Application:
     async def tts(request: web.Request) -> web.StreamResponse:
         body = await request.json()
         assert body["text"]
+        state["bodies"].append(body)
         resp = web.StreamResponse()
         await resp.prepare(request)
         try:
@@ -43,8 +44,13 @@ def make_app(forever: bool = False) -> web.Application:
             state["closed"].set()
         return resp
 
+    async def voices_h(_):
+        return web.json_response({"default": "calm", "voices": [{"id": "calm", "label": "차분하게"}]})
+
     app = web.Application()
     app["state"] = state
+    if voices:
+        app.router.add_get("/voices", voices_h)
     app.router.add_get("/info", info)
     app.router.add_post("/tts", tts)
     return app
@@ -81,4 +87,27 @@ async def test_cancel_stops_stream():
                 await tts.cancel()
         assert n < 100  # 무한 스트림이 끊겼다
         await asyncio.wait_for(app["state"]["closed"].wait(), 2.0)  # 서버도 끊김을 알아챘다
+        await tts.aclose()
+
+
+async def test_voice_passed_and_voices_parsed():
+    app = make_app()
+    async with TestServer(app) as server:
+        tts = CosyVoiceTTS(url=str(server.make_url("")))
+        tts.voice = "calm2"
+        await tts.warmup()
+        assert tts.voices == [{"id": "calm", "label": "차분하게"}]
+        _ = [c async for c in tts.stream("안녕하세요")]
+        assert app["state"]["bodies"][-1] == {"text": "안녕하세요", "voice": "calm2"}
+        tts.voice = None
+        _ = [c async for c in tts.stream("안녕하세요")]
+        assert "voice" not in app["state"]["bodies"][-1]
+        await tts.aclose()
+
+
+async def test_warmup_tolerates_missing_voices_endpoint():
+    async with TestServer(make_app(voices=False)) as server:
+        tts = CosyVoiceTTS(url=str(server.make_url("")))
+        await tts.warmup()
+        assert tts.voices == []
         await tts.aclose()

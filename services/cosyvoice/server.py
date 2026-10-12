@@ -1,6 +1,7 @@
 """CosyVoice3 스트리밍 HTTP 서버 (컨테이너 안에서 실행).
 
-POST /tts {"text": "..."} -> PCM16 mono little-endian 청크 스트림 (모델 샘플레이트)
+POST /tts {"text": "...", "voice": "calm"} -> PCM16 mono little-endian 청크 스트림 (모델 샘플레이트)
+GET  /voices              -> {"default": id, "voices": [{"id", "label"}]}
 GET  /info                -> {"sample_rate": N, "model": "..."}
 한 번에 하나만 합성한다. 클라이언트가 끊으면 다음 청크 경계에서 생성을 멈춘다.
 """
@@ -40,7 +41,24 @@ PROMPT_TEXT = os.environ.get(
     "COSYVOICE_PROMPT_TEXT",
     "You are a helpful assistant.<|endofprompt|>希望你以后能够做的比我还好呦。",
 )
-SPK_ID = "default"
+SYS = "You are a helpful assistant."
+ASSET = "/opt/CosyVoice/asset"
+WAV_Z = os.environ.get("COSYVOICE_PROMPT_WAV", f"{ASSET}/zero_shot_prompt.wav")
+WAV_X = f"{ASSET}/cross_lingual_prompt.wav"
+
+# 목소리 프리셋: mode = zero_shot(프롬프트 운율 복제) | instruct(말투 지시문 + 화자 음색만) | cross_lingual(프롬프트 없이 음색만).
+# 지시문은 후보 여러 개를 40문장 CER·F0·에너지 변동으로 골랐다 (calm: 중국어 지시문이 CER 최저, calm2: 영어 지시문).
+# text 는 zero_shot 이면 프롬프트 전사, instruct 이면 지시문이다 (모두 <|endofprompt|> 포함).
+PRESETS: dict[str, dict] = {
+    "bright": {"label": "밝게 (기존)", "wav": WAV_Z, "mode": "zero_shot", "text": PROMPT_TEXT},
+    "calm": {"label": "차분하게", "wav": WAV_Z, "mode": "instruct",
+             "text": SYS + " 请用温柔、平静的语气，非常轻声、缓慢地说话。<|endofprompt|>"},
+    "calm2": {"label": "차분하게 (다른 목소리)", "wav": WAV_X, "mode": "instruct",
+              "text": SYS + " Please say a sentence in a very soft, calm, steady voice, a little slowly.<|endofprompt|>"},
+}
+DEFAULT_VOICE = os.environ.get("CV_VOICE", "calm")
+if DEFAULT_VOICE not in PRESETS:
+    DEFAULT_VOICE = "calm"
 
 log = logging.getLogger("cosyvoice-server")
 
@@ -112,8 +130,11 @@ class Engine:
             dec = self.cv.model.flow.decoder
             o_fwd, n_steps = dec.forward, int(os.environ.get("CV_STEPS", "5"))
             dec.forward = lambda *a, **kw: o_fwd(*a, **{**kw, "n_timesteps": n_steps})
-        # 화자 프롬프트 임베딩을 미리 계산해 둔다
-        self.cv.add_zero_shot_spk(PROMPT_TEXT, PROMPT_WAV, SPK_ID)
+        # 프롬프트 wav 별 화자 특징(음성 토큰·멜·임베딩)을 한 번만 계산해 둔다
+        self.presets = PRESETS
+        self._base: dict[str, dict] = {}
+        for pr in self.presets.values():
+            self._prompt_base(pr["wav"])
 
     def _patch_llm_graph(self) -> None:
         """LLM 디코드 1스텝을 CUDA graph 로 재생한다 (StaticCache). 2~3개 모델이 GPU 를 time-slice 로 나눌 때
@@ -212,10 +233,36 @@ class Engine:
 
         llm.inference = wrapped
 
-    def synth(self, text: str):
+    def _prompt_base(self, wav: str) -> dict:
+        if wav not in self._base:
+            fe = self.cv.frontend
+            self._base[wav] = fe.frontend_zero_shot("", "", wav, self.sample_rate, "")
+        return self._base[wav]
+
+    def _model_input(self, preset: dict, seg: str) -> dict:
+        """프리셋 모드별로 model.tts 입력을 만든다 (프레임워크 frontend_* 와 같은 구성)."""
+        fe = self.cv.frontend
+        mi = dict(self._prompt_base(preset["wav"]))
+        mi.pop("text", None), mi.pop("text_len", None)
+        mi["text"], mi["text_len"] = fe._extract_text_token(seg)
+        mode = preset["mode"]
+        if mode == "zero_shot":
+            mi["prompt_text"], mi["prompt_text_len"] = fe._extract_text_token(preset["text"])
+        elif mode == "instruct":  # 지시문을 prompt_text 로, LLM 쪽 음성 프롬프트는 뺀다 (음색은 flow 가 입힌다)
+            mi["prompt_text"], mi["prompt_text_len"] = fe._extract_text_token(preset["text"])
+            mi.pop("llm_prompt_speech_token"), mi.pop("llm_prompt_speech_token_len")
+        else:  # cross_lingual
+            for k in ("prompt_text", "prompt_text_len", "llm_prompt_speech_token", "llm_prompt_speech_token_len"):
+                mi.pop(k, None)
+        return mi
+
+    def synth(self, text: str, voice: str | None = None):
         """PCM16 바이트 청크 제너레이터. 호출 전에 cancel 을 비운다."""
         self.cancel.clear()
         self.cv.model.token_hop_len = self.hop0
+        preset = self.presets.get(voice or "", self.presets[DEFAULT_VOICE])
+        if preset["mode"] == "cross_lingual":
+            text = SYS + "<|endofprompt|>" + text
         # wetext 영어 정규화가 한글+숫자 문장에서 AssertionError 를 낸다 -> 프론트엔드 없이 재시도
         try:
             self.cv.frontend.text_normalize(text, split=True, text_frontend=True)
@@ -223,25 +270,45 @@ class Engine:
         except Exception:  # noqa: BLE001
             log.warning("text_frontend 실패, 정규화 없이 합성: %s", text)
             frontend = False
-        gen = self.cv.inference_zero_shot(text, "", "", zero_shot_spk_id=SPK_ID, stream=True, text_frontend=frontend)
-        try:
-            for out in gen:
-                if self.cancel.is_set():
-                    break
-                wav = out["tts_speech"].squeeze(0).numpy()
-                yield (np.clip(wav, -1.0, 1.0) * 32767).astype("<i2").tobytes()
-        finally:
-            gen.close()
+        segs = self.cv.frontend.text_normalize(text, split=True, text_frontend=frontend)
+        for seg in segs:
+            if self.cancel.is_set():
+                break
+            self.cv.model.token_hop_len = self.hop0
+            gen = self.cv.model.tts(**self._model_input(preset, seg), stream=True, speed=1.0)
+            try:
+                for out in gen:
+                    if self.cancel.is_set():
+                        break
+                    wav = out["tts_speech"].squeeze(0).numpy()
+                    yield (np.clip(wav, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+            finally:
+                gen.close()
 
 
 async def handle_info(request: web.Request) -> web.Response:
     eng: Engine = request.app["engine"]
-    return web.json_response({"sample_rate": eng.sample_rate, "model": os.path.basename(eng.model_dir)})
+    return web.json_response({"sample_rate": eng.sample_rate, "model": os.path.basename(eng.model_dir),
+                              "default_voice": DEFAULT_VOICE})
+
+
+async def handle_voices(request: web.Request) -> web.Response:
+    eng: Engine = request.app["engine"]
+    return web.json_response({"default": DEFAULT_VOICE,
+                              "voices": [{"id": k, "label": v["label"]} for k, v in eng.presets.items()]})
 
 
 async def handle_tts(request: web.Request) -> web.StreamResponse:
     eng: Engine = request.app["engine"]
-    text = (await request.json()).get("text", "").strip()
+    body = await request.json()
+    text = body.get("text", "").strip()
+    voice = body.get("voice")
+    if os.environ.get("CV_DEV") == "1" and voice in eng.presets and isinstance(body.get("dev"), dict):
+        # 튜닝용(기본 꺼짐): 기존 프리셋의 모드·지시문만 요청별로 바꾼다. wav 는 프리셋 것을 그대로 쓴다
+        d = body["dev"]
+        eng.presets["_dev"] = {**eng.presets[voice], "mode": str(d.get("mode", eng.presets[voice]["mode"])),
+                               "text": str(d.get("text", eng.presets[voice]["text"]))}
+        voice = "_dev"
     if not text:
         return web.json_response({"error": "text required"}, status=400)
     loop = asyncio.get_running_loop()
@@ -253,7 +320,7 @@ async def handle_tts(request: web.Request) -> web.StreamResponse:
 
         def work() -> None:
             try:
-                for pcm in eng.synth(text):
+                for pcm in eng.synth(text, voice):
                     loop.call_soon_threadsafe(q.put_nowait, pcm)
             except Exception as e:  # noqa: BLE001
                 log.exception("synth 실패")
@@ -287,6 +354,7 @@ def build_app(engine: Engine) -> web.Application:
     app["engine"] = engine
     app["lock"] = asyncio.Lock()
     app.router.add_get("/info", handle_info)
+    app.router.add_get("/voices", handle_voices)
     app.router.add_post("/tts", handle_tts)
     return app
 
@@ -303,7 +371,9 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     engine = Engine(args.model_dir, fp16=args.fp16)
     t0 = time.monotonic()
-    n = sum(len(p) for p in engine.synth("안녕하세요, 워밍업입니다."))  # 워밍업
+    n = 0
+    for vid in engine.presets:  # 프리셋마다 한 번씩 워밍업 (모드별 경로·CUDA graph 확인)
+        n += sum(len(p) for p in engine.synth("안녕하세요, 워밍업입니다.", vid))
     log.info("warmup %.1fs, %d bytes, sr=%d", time.monotonic() - t0, n, engine.sample_rate)
     web.run_app(build_app(engine), host=args.host, port=args.port)
 

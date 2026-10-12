@@ -62,6 +62,8 @@ tests/
 
 - 다른 PC에서 접속하면 그 PC에서 `ssh -L 8080:localhost:8080 <장비>`를 먼저 실행한다. 마이크(getUserMedia)는 localhost나 HTTPS에서만 동작한다.
 - 스피커 소리가 마이크로 들어가 barge-in이 잘못 걸리면 헤드폰을 쓴다. 또는 화면의 barge-in 선택을 끈다.
+- 화면의 「목소리」에서 말투를 고른다: 차분하게(기본), 차분하게 (다른 목소리), 밝게 (기존). 모두 CosyVoice 공식 예제 음성이다.
+- 설정: `scripts/run_demo.sh --first-min 2 --vad-silence-ms 500`. `--first-min`은 첫 청크 최소 글자 수, `--vad-silence-ms`는 발화 끝 판정 무음 길이다.
 - 브라우저 탭은 하나만 연다. TTS 엔진을 탭끼리 공유하므로 두 탭이 동시에 말하면 충돌한다.
 - GPU 없이 화면만 시험하려면: `scripts/run_demo.sh --llm mock --tts mock --stt mock`
 - 정지: `scripts/stop_llm.sh`, `docker rm -f healthup-cosyvoice`

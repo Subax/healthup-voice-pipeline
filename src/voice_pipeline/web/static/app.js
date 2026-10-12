@@ -114,11 +114,21 @@ function onInterrupt(m) {
 }
 
 // ---------- 서버 메시지 ----------
+function onHello(m) {
+  $("engines").textContent = `llm=${m.engines.llm} tts=${m.engines.tts} stt=${m.engines.stt}` +
+    (m.first_min != null ? ` first_min=${m.first_min}` : "") +
+    (m.vad_silence_ms != null ? ` vad_silence=${m.vad_silence_ms}ms` : "");
+  const voices = m.voices || [], sel = $("voice");
+  sel.textContent = "";
+  voices.forEach((v) => { const o = document.createElement("option"); o.value = v.id; o.textContent = v.label || v.id; sel.appendChild(o); });
+  if (m.voice) sel.value = m.voice;
+  $("voiceWrap").hidden = voices.length === 0;
+}
 function onMessage(ev) {
   if (typeof ev.data !== "string") { if (ctx) onFrame(ev.data); return; }
   const m = JSON.parse(ev.data);
   switch (m.type) {
-    case "hello": $("engines").textContent = `llm=${m.engines.llm} tts=${m.engines.tts} stt=${m.engines.stt}`; break;
+    case "hello": onHello(m); break;
     case "avatar_state": lastState = m.state; setBadge(); break;
     case "vad": $("vad").classList.toggle("on", m.speaking); break;
     case "transcript": addMsg("user", m.text + (m.emotion || m.event ? `  [${[m.emotion, m.event].filter(Boolean).join(", ")}]` : "")); break;
@@ -170,6 +180,7 @@ async function start() {
 }
 
 $("start").onclick = start;
+$("voice").onchange = () => send({ type: "config", voice: $("voice").value });
 $("bargein").onchange = () => send({ type: "config", barge_in: $("bargein").checked });
 $("reset").onclick = () => send({ type: "reset" });
 $("form").onsubmit = (e) => {

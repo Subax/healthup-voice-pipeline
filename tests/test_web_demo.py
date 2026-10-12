@@ -152,3 +152,26 @@ async def test_sink_message_formats():
     sink.handle_playback({"type": "playback", "turn_id": 3, "event": "progress", "played_ms": 120})
     sink.handle_playback({"type": "playback", "turn_id": 3, "event": "stopped", "played_ms": -1})
     assert sink.played_ms(3) == 120 and events[-1] == (3, "stopped", -1.0)
+
+
+async def test_hello_and_voice_config():
+    tts = MockTTS(first_audio_ms=10, rtf=0.5)
+    tts.voices = [{"id": "calm", "label": "차분"}, {"id": "warm", "label": "따뜻"}]
+    tts.voice = "calm"
+    eng = Engines(MockLLM(ttft_ms=20, tokens_per_s=400), tts, MockSTT("x"), lambda: EnergyVAD(min_silence_ms=100),
+                  {"llm": "mock", "tts": "mock", "stt": "mock"}, first_min=5, vad_silence_ms=400)
+    c = TestClient(TestServer(create_app(eng)))
+    await c.start_server()
+    try:
+        ws = await c.ws_connect("/ws")
+        hello = await recv(ws)
+        assert hello["first_min"] == 5 and hello["vad_silence_ms"] == 400
+        assert [v["id"] for v in hello["voices"]] == ["calm", "warm"] and hello["voice"] == "calm"
+        await ws.send_str(json.dumps({"type": "config", "voice": "warm"}))
+        await ws.send_str(json.dumps({"type": "config", "voice": "nope"}))
+        await ws.send_str(json.dumps({"type": "reset"}))
+        await until(ws, is_type("reset_done"), [])
+        assert tts.voice == "warm"
+        await ws.close()
+    finally:
+        await c.close()
