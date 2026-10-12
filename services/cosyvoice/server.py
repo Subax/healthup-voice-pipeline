@@ -44,17 +44,21 @@ PROMPT_TEXT = os.environ.get(
 SYS = "You are a helpful assistant."
 ASSET = "/opt/CosyVoice/asset"
 WAV_Z = os.environ.get("COSYVOICE_PROMPT_WAV", f"{ASSET}/zero_shot_prompt.wav")
-WAV_X = f"{ASSET}/cross_lingual_prompt.wav"
 
 # 목소리 프리셋: mode = zero_shot(프롬프트 운율 복제) | instruct(말투 지시문 + 화자 음색만) | cross_lingual(프롬프트 없이 음색만).
-# 지시문은 후보 여러 개를 40문장 CER·F0·에너지 변동으로 골랐다 (calm: 중국어 지시문이 CER 최저, calm2: 영어 지시문).
+# 지시문은 후보 여러 개를 40문장 CER·F0·에너지 변동으로 골랐다 (calm: 중국어 지시문이 CER 최저).
 # text 는 zero_shot 이면 프롬프트 전사, instruct 이면 지시문이다 (모두 <|endofprompt|> 포함).
 PRESETS: dict[str, dict] = {
     "bright": {"label": "밝게 (기존)", "wav": WAV_Z, "mode": "zero_shot", "text": PROMPT_TEXT},
     "calm": {"label": "차분하게", "wav": WAV_Z, "mode": "instruct",
              "text": SYS + " 请用温柔、平静的语气，非常轻声、缓慢地说话。<|endofprompt|>"},
-    "calm2": {"label": "차분하게 (다른 목소리)", "wav": WAV_X, "mode": "instruct",
-              "text": SYS + " Please say a sentence in a very soft, calm, steady voice, a little slowly.<|endofprompt|>"},
+    # 톤 프리셋(자동 톤 선택용, 같은 화자). 지시문 후보를 16문장 CER·F0·에너지 변동으로 골랐다 (STATE 참고)
+    "comfort": {"label": "위로하는", "wav": WAV_Z, "mode": "instruct",
+                "text": SYS + " 请用温柔、体贴的语气，轻轻地、慢慢地说话。<|endofprompt|>"},
+    "warm": {"label": "따뜻하게", "wav": WAV_Z, "mode": "instruct",
+             "text": SYS + " 请用温和、愉快的语气，自然地说话，声音温暖而不夸张。<|endofprompt|>"},
+    "steady": {"label": "차분하고 단단하게", "wav": WAV_Z, "mode": "instruct",
+               "text": SYS + " Please speak in a calm, low, steady voice, slowly and gently.<|endofprompt|>"},
 }
 DEFAULT_VOICE = os.environ.get("CV_VOICE", "calm")
 if DEFAULT_VOICE not in PRESETS:

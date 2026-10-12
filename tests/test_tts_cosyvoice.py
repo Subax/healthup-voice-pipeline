@@ -94,11 +94,11 @@ async def test_voice_passed_and_voices_parsed():
     app = make_app()
     async with TestServer(app) as server:
         tts = CosyVoiceTTS(url=str(server.make_url("")))
-        tts.voice = "calm2"
+        tts.voice = "comfort"
         await tts.warmup()
         assert tts.voices == [{"id": "calm", "label": "차분하게"}]
         _ = [c async for c in tts.stream("안녕하세요")]
-        assert app["state"]["bodies"][-1] == {"text": "안녕하세요", "voice": "calm2"}
+        assert app["state"]["bodies"][-1] == {"text": "안녕하세요", "voice": "comfort"}
         tts.voice = None
         _ = [c async for c in tts.stream("안녕하세요")]
         assert "voice" not in app["state"]["bodies"][-1]

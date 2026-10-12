@@ -19,9 +19,12 @@ from ..chunker import SemanticChunker
 from ..pipeline import VoicePipeline
 from ..trace import (BACKCHANNEL, FIRST_CHUNK, LLM_FIRST_TOKEN, PLAYBACK_START, SPEECH_END, STT_FINAL,
                      TTS_FIRST_AUDIO, TurnTrace)
+from ..tone import AUTO, CALM, extract_features, pick_tone
 from .engines import Engines
 
 log = logging.getLogger("voice_pipeline.web")
+
+AUTO_LABEL = "자동 (사용자 말투에 맞춤)"
 
 TRACE_MARKS = {"stt_final": STT_FINAL, "llm_first_token": LLM_FIRST_TOKEN, "first_chunk": FIRST_CHUNK,
                "backchannel": BACKCHANNEL, "tts_first_audio": TTS_FIRST_AUDIO, "playback_start": PLAYBACK_START}
@@ -60,6 +63,13 @@ class DemoSession:
         self.stt_id = engines.stt_id        # STT 선택은 세션마다
         self._stt_switch: asyncio.Task | None = None
         self._last_pcm: bytes | None = None  # 마지막 마이크 발화 (다시 인식용)
+        self.voice_auto = True              # 목소리 선택이 auto 인가 (TTS 목록이 있어야 실제로 켜진다)
+
+    def _voice_ids(self) -> set[str]:
+        return {v.get("id") for v in (getattr(self.engines.tts, "voices", None) or [])}
+
+    def _auto_active(self) -> bool:
+        return self.voice_auto and bool(self._voice_ids())
 
     def _stt(self) -> Any:
         return self.engines._stt_cache[self.stt_id]
@@ -72,10 +82,13 @@ class DemoSession:
     async def send_hello(self) -> None:
         tts = self.engines.tts
         voices = list(getattr(tts, "voices", None) or [])  # 목소리 목록은 TTS 어댑터가 warmup 뒤에 채운다
+        voice = getattr(tts, "voice", None)
+        if self._auto_active():  # auto 는 세션이 UI 용으로만 붙인다 (서버 목록에는 없다)
+            voices, voice = [{"id": AUTO, "label": AUTO_LABEL}, *voices], AUTO
         await self.send({"type": "hello", "engines": self.engines.labels, "barge_in": self.barge_in_enabled,
                          "backchannel": self.backchannel_enabled,
                          "first_min": self.engines.first_min, "vad_silence_ms": self.engines.vad_silence_ms,
-                         "voices": voices, "voice": getattr(tts, "voice", None),
+                         "voices": voices, "voice": voice,
                          "stt_options": self.engines.stt_options(), "stt": self.stt_id})
 
     async def _on_token(self, turn_id: int, text: str) -> None:
@@ -150,8 +163,10 @@ class DemoSession:
             voice = msg.get("voice")
             if isinstance(voice, str) and voice:
                 # 엔진은 공유다. 탭 하나만 쓴다는 전제 (README 참고)
-                ids = {v.get("id") for v in (getattr(self.engines.tts, "voices", None) or [])}
-                if voice in ids:
+                if voice == AUTO and self._voice_ids():
+                    self.voice_auto = True
+                elif voice in self._voice_ids():
+                    self.voice_auto = False
                     self.engines.tts.voice = voice
             stt_id = msg.get("stt")
             if isinstance(stt_id, str) and stt_id:
@@ -225,6 +240,15 @@ class DemoSession:
             return
         self._task = asyncio.create_task(self._run_turn(trace, pcm16, text))
 
+    def _apply_tone(self, emotion: str | None, pcm16: bytes | None, text: str) -> str:
+        """auto: 감정·음향 특징으로 톤을 골라 이번 턴의 TTS 목소리로 쓴다. 서버에 없는 톤이면 calm."""
+        tone = pick_tone(emotion, extract_features(pcm16, text))
+        ids = self._voice_ids()
+        if tone not in ids:
+            tone = CALM if CALM in ids else getattr(self.engines.tts, "voice", None)
+        self.engines.tts.voice = tone  # 엔진은 공유다. 탭 하나만 쓴다는 전제
+        return tone
+
     async def _run_turn(self, trace: TurnTrace, pcm16: bytes | None, text: str | None) -> None:
         stt_ms, emotion, event = 0.0, None, None
         stt_id = self.stt_id
@@ -238,8 +262,9 @@ class DemoSession:
             trace.mark(STT_FINAL)
             if not text:
                 return
+            tone = self._apply_tone(emotion, pcm16, text) if self._auto_active() else None
             await self.send({"type": "transcript", "text": text, "stt": stt_id, "stt_ms": round(stt_ms, 1),
-                             "emotion": emotion, "event": event})
+                             "emotion": emotion, "event": event, "tone": tone})
             self._stage = "respond"
             opener = None
             bank = self.engines.backchannel

@@ -38,7 +38,7 @@ class VADSegmenter:
         min_speech_ms: int = 250,
         min_silence_ms: int = 500,
         max_speech_s: float = 20.0,
-        pre_roll_ms: int = 200,
+        pre_roll_ms: int = 300,
         window: int = 512,
         num_threads: int = 1,
     ):

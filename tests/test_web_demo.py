@@ -166,7 +166,7 @@ async def test_hello_and_voice_config():
         ws = await c.ws_connect("/ws")
         hello = await recv(ws)
         assert hello["first_min"] == 5 and hello["vad_silence_ms"] == 400
-        assert [v["id"] for v in hello["voices"]] == ["calm", "warm"] and hello["voice"] == "calm"
+        assert [v["id"] for v in hello["voices"]] == ["auto", "calm", "warm"] and hello["voice"] == "auto"
         await ws.send_str(json.dumps({"type": "config", "voice": "warm"}))
         await ws.send_str(json.dumps({"type": "config", "voice": "nope"}))
         await ws.send_str(json.dumps({"type": "reset"}))
@@ -291,3 +291,74 @@ async def test_stop_interrupts_and_returns_to_listening(client):
     st = await until(ws, lambda m: isinstance(m, dict) and m["type"] == "avatar_state" and m["state"] == "listening", msgs)
     assert st["state"] == "listening"
     await ws.close()
+
+
+class RecordingTTS(MockTTS):
+    """합성할 때 쓴 voice 를 기록한다."""
+
+    def __init__(self):
+        super().__init__(first_audio_ms=10, rtf=0.5)
+        self.voices = [{"id": v, "label": v} for v in ("calm", "comfort", "warm", "steady")]
+        self.voice = "calm"
+        self.used: list[str | None] = []
+
+    async def stream(self, text):
+        self.used.append(self.voice)
+        async for c in super().stream(text):
+            yield c
+
+
+async def _tone_client(emotion):
+    tts = RecordingTTS()
+    eng = Engines(MockLLM(ttft_ms=20, tokens_per_s=400), tts, MockSTT("마이크 테스트", emotion=emotion),
+                  lambda: EnergyVAD(min_silence_ms=100), {"llm": "mock", "tts": "mock", "stt": "mock"})
+    c = TestClient(TestServer(create_app(eng)))
+    await c.start_server()
+    return c, tts
+
+
+async def _mic_turn(ws):
+    for _ in range(5):
+        await ws.send_bytes(LOUD * 2)
+    for _ in range(10):
+        await ws.send_bytes(QUIET)
+    msgs: list = []
+    await until(ws, is_type("turn_done"), msgs)
+    return next(m for m in msgs if isinstance(m, dict) and m["type"] == "transcript")
+
+
+async def test_auto_voice_picks_tone_from_emotion():
+    c, tts = await _tone_client("SAD")
+    try:
+        ws = await c.ws_connect("/ws")
+        hello = await recv(ws)
+        assert hello["voice"] == "auto" and hello["voices"][0]["id"] == "auto"
+        assert "auto" not in [v["id"] for v in tts.voices]  # 서버 목록에는 auto 가 없다
+        tr = await _mic_turn(ws)
+        assert tr["emotion"] == "SAD" and tr["tone"] == "comfort"
+        assert tts.used and set(tts.used) == {"comfort"}
+        # 글자 입력은 감정이 없으므로 calm
+        await ws.send_str(json.dumps({"type": "text_input", "text": "안녕"}))
+        msgs: list = []
+        await until(ws, is_type("turn_done"), msgs)
+        assert next(m for m in msgs if isinstance(m, dict) and m["type"] == "transcript")["tone"] == "calm"
+        assert tts.used[-1] == "calm" and "auto" not in tts.used
+        await ws.close()
+    finally:
+        await c.close()
+
+
+async def test_fixed_voice_ignores_emotion():
+    c, tts = await _tone_client("ANGRY")
+    try:
+        ws = await c.ws_connect("/ws")
+        await recv(ws)
+        await ws.send_str(json.dumps({"type": "config", "voice": "warm"}))
+        tr = await _mic_turn(ws)
+        assert tr["tone"] is None and set(tts.used) == {"warm"}
+        await ws.send_str(json.dumps({"type": "config", "voice": "auto"}))
+        tr = await _mic_turn(ws)
+        assert tr["tone"] == "steady" and tts.used[-1] == "steady"
+        await ws.close()
+    finally:
+        await c.close()

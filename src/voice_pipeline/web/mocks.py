@@ -32,14 +32,14 @@ class MockSTTResult:
 class MockSTT:
     sample_rate = 16000
 
-    def __init__(self, text: str = "안녕하세요, 오늘 혈압 결과 알려주세요."):
-        self.text = text
+    def __init__(self, text: str = "안녕하세요, 오늘 혈압 결과 알려주세요.", emotion: str | None = None):
+        self.text, self.emotion = text, emotion
 
     async def warmup(self) -> None:
         return None
 
     async def transcribe(self, pcm16: bytes) -> MockSTTResult:
-        return MockSTTResult(self.text, elapsed_ms=1.0)
+        return MockSTTResult(self.text, emotion=self.emotion, elapsed_ms=1.0)
 
 
 class EnergyVAD:

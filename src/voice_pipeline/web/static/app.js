@@ -143,7 +143,8 @@ function onMessage(ev) {
     case "avatar_state": lastState = m.state; setBadge(); break;
     case "vad": $("vad").classList.toggle("on", m.speaking); break;
     case "transcript": addMsg("user", m.text + (m.emotion || m.event ? `  [${[m.emotion, m.event].filter(Boolean).join(", ")}]` : "") +
-      (m.stt ? `  [${m.stt} ${fmt(m.stt_ms)}ms]` : "")); break;
+      (m.stt ? `  [${m.stt} ${fmt(m.stt_ms)}ms]` : "") +
+      (m.tone ? `  [톤 ${m.tone}]` : "")); break;
     case "assistant_delta":
       if (!turnEls[m.turn_id]) turnEls[m.turn_id] = addMsg("bot", "");
       turnEls[m.turn_id].textContent += m.text; $("log").scrollTop = $("log").scrollHeight; break;
