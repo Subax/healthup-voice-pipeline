@@ -30,7 +30,7 @@
 - TTS: `services/cosyvoice/` 서버 이미지 + `tts/cosyvoice.py` 어댑터. 스트리밍·연결 끊김 시 생성 중단
 - 목소리 프리셋 (`GET /voices`): 여성 화자 하나(공식 예제). `calm`(기본), `comfort`, `warm`, `steady`(instruct 지시문), `bright`(기존). `calm2`는 삭제했다
 - 자동 톤 (`tone.py`): 화면 기본값 「자동」. SenseVoice 감정 태그와 음량·말 속도로 턴마다 톤을 고른다. 임계값은 미튜닝 추측값이다
-- STT 엔진 2개: `sensevoice`(CPU, 기본), `qwen3asr`(Qwen3-ASR-1.7B, vLLM 컨테이너 `healthup-asr` 127.0.0.1:8092, `scripts/run_asr.sh`, 메모리 약 11GB)
+- STT 엔진 2개: `sensevoice`(CPU, 기본), `qwen3asr`(Qwen3-ASR-1.7B FP8 기본, vLLM 컨테이너 `healthup-asr` 127.0.0.1:8092, `scripts/run_asr.sh`, `ASR_MODEL_PATH`로 0.6B 선택)
 - STT 후처리 (`stt/postprocess.py`): 언어 ko 고정, 한자·가나 제거, Kiwi 띄어쓰기 교정. VAD pre-roll 300ms
 - 데모 설정: `--first-min`(기본 2), `--vad-silence-ms`(기본 500), 화면의 목소리 선택
 - LLM 프롬프트: 첫 문장을 짧은 공감 문장으로, 차분한 말투, 느낌표 금지
@@ -71,7 +71,8 @@
 | 전 구간 | 같은 조건 + 맞장구, 3턴, 2026-10-12 | 재생 시작(맞장구) 123 / 101 / 101ms, 본문 TTS 첫 오디오 1551 / 1521 / 1561ms |
 | STT 띄어쓰기 | TTS wav 40 + ko.wav, VAD 구간 전부 이어 붙임, SenseVoice | CER(공백 제외) 0.133, 간격오류 0.123 → 0.048 (Kiwi, +0.7ms) |
 | STT 비교 | 같은 41개, VAD 구간 56개, LLM 유휴 | SenseVoice+Kiwi CER 0.133 / 간격 0.048 / P50 42ms·P90 69ms. Qwen3-ASR CER 0.072 / 간격 0.034 / P50 417ms·P90 699ms |
-| STT 데모 | 브라우저 3턴, Qwen3-ASR | STT 447ms, 재생 시작(맞장구) 509~511ms, 본문 첫 오디오 1804~2289ms |
+| STT Qwen3-ASR 가속 | 같은 41개, LLM 유휴 → LLM 생성 중 | 1.7B bf16 P50 390 / P90 674ms. 1.7B FP8 CER 0.075, 220 / 371 → 468 / 803ms. 0.6B FP8 CER 0.069, 109 / 207 → 257 / 433ms |
+| STT 데모 | 브라우저 3턴, Qwen3-ASR bf16 | STT 447ms, 재생 시작(맞장구) 509~511ms, 본문 첫 오디오 1804~2289ms |
 | 톤 프리셋 | 16문장, CER P50 / P90 / F0 중앙값(자체 추정기) | calm 0.03 / 0.38 / 222Hz, comfort 0.03 / 0.33 / 259Hz, warm 0.03 / 0.38 / 247Hz, steady 0.06 / 0.38 / 231Hz |
 | 목소리 | 40문장, CER P50 / F0 중앙값 / 초당 글자 시간 | bright 0.11 / 277Hz / 0.190초, calm 0.08 / 219Hz / 0.214초, calm2 0.12 / 127Hz / 0.277초 |
 
@@ -136,7 +137,8 @@
 - 확인: 테스트 124개 통과. 브라우저 2턴에서 "조금만 생각을 하면서 살면" 정상 띄어쓰기, STT 38~66ms
 - 톤이 실제로 위로·따뜻함으로 들리는지는 청취로 확인하지 않았다 (`bench/results/voices/`)
 - Qwen3-ASR-1.7B 추가 (사용자 선택). vLLM 0.24가 기본 지원. 오류율은 SenseVoice의 약 절반, 지연은 약 10배
-- 확인하지 않음: LLM 생성 중 Qwen3-ASR 지연, 실제 마이크 음성 CER
+- Qwen3-ASR 지연은 디코드(토큰당 약 20ms, 24토큰)가 대부분이다. 인코더+prefill은 29ms. FP8로 기본을 바꿨다
+- 확인하지 않음: 실제 마이크 음성 CER. 0.6B가 합성음에서 1.7B보다 낮은 CER을 낸 이유
 
 ### 2026-10-12 (3) — STT 선택, 중지 버튼, 맞장구 수정
 
