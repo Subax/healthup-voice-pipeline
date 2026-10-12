@@ -32,7 +32,7 @@ function setLatency(turn_id, upd) {
   for (const k in upd) if (upd[k] != null) tr[k] = upd[k]; // 늦게 오는 값(playback_start)만 채운다
   let tr_el = latRows[turn_id];
   if (!tr_el) { tr_el = latRows[turn_id] = document.createElement("tr"); $("lat").prepend(tr_el); }
-  const cells = [`#${turn_id}`, tr.stt_ms, tr.llm_first_token, tr.first_chunk, tr.tts_first_audio, tr.playback_start];
+  const cells = [`#${turn_id}`, tr.stt_ms, tr.llm_first_token, tr.first_chunk, tr.backchannel, tr.tts_first_audio, tr.playback_start];
   tr_el.innerHTML = cells.map((c, i) => `<td>${i ? fmt(c) : c}</td>`).join("");
 }
 
@@ -123,6 +123,7 @@ function onHello(m) {
   voices.forEach((v) => { const o = document.createElement("option"); o.value = v.id; o.textContent = v.label || v.id; sel.appendChild(o); });
   if (m.voice) sel.value = m.voice;
   $("voiceWrap").hidden = voices.length === 0;
+  if (m.backchannel != null) $("backchannel").checked = m.backchannel;
 }
 function onMessage(ev) {
   if (typeof ev.data !== "string") { if (ctx) onFrame(ev.data); return; }
@@ -158,7 +159,7 @@ async function start() {
   ws.onmessage = onMessage;
   ws.onclose = () => { $("badge").textContent = "연결 끊김"; $("badge").className = "badge"; };
   await new Promise((res) => { ws.onopen = res; });
-  send({ type: "config", barge_in: $("bargein").checked });
+  send({ type: "config", barge_in: $("bargein").checked, backchannel: $("backchannel").checked });
   lastState = "listening"; setBadge();
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -181,6 +182,7 @@ async function start() {
 
 $("start").onclick = start;
 $("voice").onchange = () => send({ type: "config", voice: $("voice").value });
+$("backchannel").onchange = () => send({ type: "config", backchannel: $("backchannel").checked });
 $("bargein").onchange = () => send({ type: "config", barge_in: $("bargein").checked });
 $("reset").onclick = () => send({ type: "reset" });
 $("form").onsubmit = (e) => {

@@ -6,6 +6,7 @@ import inspect
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from ..backchannel import BackchannelBank
 from ..llm.events import LLMClient
 from ..tts.base import TTSEngine
 from .mocks import EnergyVAD, MockSTT
@@ -20,6 +21,7 @@ class Engines:
     labels: dict[str, str]
     first_min: int = 2               # 첫 청크 최소 글자 수
     vad_silence_ms: int = 500        # 발화 끝으로 보는 무음 길이
+    backchannel: BackchannelBank | None = None  # 미리 합성한 맞장구
 
     async def warmup(self) -> None:
         for e in (self.stt, self.tts, self.llm):
@@ -28,6 +30,9 @@ class Engines:
                 r = fn()
                 if inspect.isawaitable(r):
                     await r
+            if e is self.tts and self.backchannel is not None:
+                voices = [v["id"] for v in getattr(self.tts, "voices", None) or []] or [getattr(self.tts, "voice", None)]
+                await self.backchannel.prepare(self.tts, voices)  # 목소리 목록은 warmup 뒤에 채워진다
 
     async def close(self) -> None:
         fn = getattr(self.llm, "close", None)
@@ -44,7 +49,7 @@ def _mock_reply(messages: list[dict]) -> str:
 
 
 def build_engines(llm: str = "mock", tts: str = "mock", stt: str = "mock", *,
-                  first_min: int = 2, vad_silence_ms: int = 500) -> Engines:
+                  first_min: int = 2, vad_silence_ms: int = 500, backchannel: bool = True) -> Engines:
     labels = {"llm": llm, "tts": tts, "stt": stt}
     if llm == "vllm":
         from ..llm.openai_stream import OpenAIStreamLLM
@@ -63,4 +68,5 @@ def build_engines(llm: str = "mock", tts: str = "mock", stt: str = "mock", *,
         stt_o, make_vad = SenseVoiceSTT(), (lambda: VADSegmenter(min_silence_ms=vad_silence_ms))
     else:
         stt_o, make_vad = MockSTT(), EnergyVAD
-    return Engines(llm_o, tts_o, stt_o, make_vad, labels, first_min, vad_silence_ms)
+    return Engines(llm_o, tts_o, stt_o, make_vad, labels, first_min, vad_silence_ms,
+                   BackchannelBank() if backchannel else None)

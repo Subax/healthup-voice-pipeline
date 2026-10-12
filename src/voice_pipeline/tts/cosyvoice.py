@@ -33,8 +33,11 @@ class CosyVoiceTTS:
         self.sample_rate = int(info["sample_rate"])
         try:
             async with session.get(f"{self.url}/voices") as r:
-                self.voices = (await r.json())["voices"] if r.status == 200 else []
-        except (aiohttp.ClientError, KeyError, ValueError):
+                data = await r.json() if r.status == 200 else {}
+                self.voices = data.get("voices", [])
+                if self.voice is None:
+                    self.voice = data.get("default")  # 서버 기본 목소리를 명시한다 (맞장구 키·화면 선택과 맞춘다)
+        except (aiohttp.ClientError, KeyError, ValueError, AttributeError):
             self.voices = []  # 구버전 서버
 
     async def stream(self, text: str) -> AsyncIterator[bytes]:

@@ -175,3 +175,52 @@ async def test_hello_and_voice_config():
         await ws.close()
     finally:
         await c.close()
+
+
+async def _bc_client(enabled=True):
+    from voice_pipeline.backchannel import BackchannelBank
+    eng = Engines(MockLLM(ttft_ms=20, tokens_per_s=400), MockTTS(first_audio_ms=10, rtf=0.1),
+                  MockSTT("마이크 테스트"), lambda: EnergyVAD(min_silence_ms=100),
+                  {"llm": "mock", "tts": "mock", "stt": "mock"},
+                  backchannel=BackchannelBank(seed=0) if enabled else None)
+    c = TestClient(TestServer(create_app(eng)))
+    await c.start_server()
+    return c
+
+
+async def test_backchannel_hello_and_trace():
+    c = await _bc_client()
+    try:
+        ws = await c.ws_connect("/ws")
+        assert (await recv(ws))["backchannel"] is True
+        await ws.send_str(json.dumps({"type": "text_input", "text": "안녕"}))
+        done = await until(ws, is_type("turn_done"), [])
+        tr = done["trace"]
+        assert tr["backchannel"] is not None and tr["backchannel"] < tr["tts_first_audio"]
+        await ws.close()
+    finally:
+        await c.close()
+
+
+async def test_backchannel_config_off_has_no_opener():
+    c = await _bc_client()
+    try:
+        ws = await c.ws_connect("/ws")
+        await recv(ws)
+        await ws.send_str(json.dumps({"type": "config", "backchannel": False}))
+        await ws.send_str(json.dumps({"type": "text_input", "text": "안녕"}))
+        done = await until(ws, is_type("turn_done"), [])
+        assert done["trace"]["backchannel"] is None
+        await ws.close()
+    finally:
+        await c.close()
+
+
+async def test_backchannel_absent_hello_false():
+    c = await _bc_client(enabled=False)
+    try:
+        ws = await c.ws_connect("/ws")
+        assert (await recv(ws))["backchannel"] is False
+        await ws.close()
+    finally:
+        await c.close()

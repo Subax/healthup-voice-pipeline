@@ -16,6 +16,7 @@ TURN_CONFIRMED = "turn_confirmed"  # t1
 STT_FINAL = "stt_final"          # t2
 LLM_FIRST_TOKEN = "llm_first_token"  # t3
 FIRST_CHUNK = "first_chunk"      # t4
+BACKCHANNEL = "backchannel"      # 미리 합성한 맞장구의 첫 프레임을 낸 시각
 TTS_FIRST_AUDIO = "tts_first_audio"  # t5
 PLAYBACK_START = "playback_start"  # t6 (Unreal 회신 또는 로컬 싱크)
 

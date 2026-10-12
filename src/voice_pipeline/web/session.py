@@ -17,14 +17,14 @@ from ..bridge.ws_server_sink import WebSocketServerSink
 from ..llm.events import LLMClient, LLMEvent, Token
 from ..chunker import SemanticChunker
 from ..pipeline import VoicePipeline
-from ..trace import (FIRST_CHUNK, LLM_FIRST_TOKEN, PLAYBACK_START, SPEECH_END, STT_FINAL,
+from ..trace import (BACKCHANNEL, FIRST_CHUNK, LLM_FIRST_TOKEN, PLAYBACK_START, SPEECH_END, STT_FINAL,
                      TTS_FIRST_AUDIO, TurnTrace)
 from .engines import Engines
 
 log = logging.getLogger("voice_pipeline.web")
 
 TRACE_MARKS = {"stt_final": STT_FINAL, "llm_first_token": LLM_FIRST_TOKEN, "first_chunk": FIRST_CHUNK,
-               "tts_first_audio": TTS_FIRST_AUDIO, "playback_start": PLAYBACK_START}
+               "backchannel": BACKCHANNEL, "tts_first_audio": TTS_FIRST_AUDIO, "playback_start": PLAYBACK_START}
 
 
 class TeeLLM:
@@ -51,6 +51,7 @@ class DemoSession:
         self.sink.playback_listener = self._on_playback
         self.vad = engines.make_vad()
         self.barge_in_enabled = True
+        self.backchannel_enabled = engines.backchannel is not None
         self._task: asyncio.Task | None = None
         self._stage: str | None = None      # "stt" | "respond" | None
         self._bg: set[asyncio.Task] = set()
@@ -66,6 +67,7 @@ class DemoSession:
         tts = self.engines.tts
         voices = list(getattr(tts, "voices", None) or [])  # 목소리 목록은 TTS 어댑터가 warmup 뒤에 채운다
         await self.send({"type": "hello", "engines": self.engines.labels, "barge_in": self.barge_in_enabled,
+                         "backchannel": self.backchannel_enabled,
                          "first_min": self.engines.first_min, "vad_silence_ms": self.engines.vad_silence_ms,
                          "voices": voices, "voice": getattr(tts, "voice", None)})
 
@@ -136,6 +138,8 @@ class DemoSession:
         elif kind == "config":
             if "barge_in" in msg:
                 self.barge_in_enabled = bool(msg["barge_in"])
+            if "backchannel" in msg:
+                self.backchannel_enabled = bool(msg["backchannel"]) and self.engines.backchannel is not None
             voice = msg.get("voice")
             if isinstance(voice, str) and voice:
                 # 엔진은 공유다. 탭 하나만 쓴다는 전제 (README 참고)
@@ -180,7 +184,12 @@ class DemoSession:
             await self.send({"type": "transcript", "text": text, "stt_ms": round(stt_ms, 1),
                              "emotion": emotion, "event": event})
             self._stage = "respond"
-            res = await self.pipeline.respond(text, trace=trace)
+            opener = None
+            bank = self.engines.backchannel
+            if self.backchannel_enabled and bank is not None:
+                picked = bank.pick(getattr(self.engines.tts, "voice", None))
+                opener = picked[1] if picked else None
+            res = await self.pipeline.respond(text, trace=trace, opener=opener)
             await self.send({"type": "turn_done", "turn_id": res.trace.turn_id,
                              "interrupted": res.interrupted, "spoken_text": res.spoken_text,
                              "trace": {"stt_ms": round(stt_ms, 1), **self._trace_ms(res.trace)}})

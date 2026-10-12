@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -17,12 +18,16 @@ from .chunker import SemanticChunker
 from .llm.events import Done, LLMClient, Meta, RiskUpdate, Token
 from .normalize import normalize_for_tts
 from .sinks import AudioSink
-from .trace import FIRST_CHUNK, LLM_FIRST_TOKEN, PLAYBACK_START, SPEECH_END, TTS_FIRST_AUDIO, TurnTrace
+from .trace import BACKCHANNEL, FIRST_CHUNK, LLM_FIRST_TOKEN, PLAYBACK_START, SPEECH_END, TTS_FIRST_AUDIO, TurnTrace
 from .tts.base import TTSEngine
 from .turns import TurnGuard
 
 # ⚠️ 임시 문구. 정본은 정신상담 LLM 문서의 안전 응답 템플릿을 따른다.
 SAFETY_TEXT_119 = "지금 많이 위험해 보여요. 화면의 안내에 따라 바로 119에 연락해 주세요. 제가 곁에서 함께 있을게요."
+
+
+# 맞장구를 이미 냈을 때 LLM 첫 청크 앞의 군더더기 (구두점 필수: "아침에", "음식은"은 남는다)
+_LEADING_FILLER = re.compile(r"^\s*(네|예|음|아|응)[,.…!?~]+\s*")
 
 
 @dataclass
@@ -38,6 +43,7 @@ class TurnResult:
     interrupted: bool = False
     risk_grade: str = "일반"
     spoken_text: str = ""
+    opener_ms: float = 0.0   # 미리 합성한 맞장구 재생 길이 (대화 기록에서 뺀다)
     chunks: list[_Chunk] = field(default_factory=list)
 
 
@@ -69,14 +75,18 @@ class VoicePipeline:
 
     # ---------- 공개 API ----------
 
-    async def respond(self, user_text: str, trace: TurnTrace | None = None) -> TurnResult:
-        """사용자 발화 하나에 응답한다. trace에 speech_end 등을 미리 찍어 넘길 수 있다."""
+    async def respond(self, user_text: str, trace: TurnTrace | None = None,
+                      opener: bytes | None = None) -> TurnResult:
+        """사용자 발화 하나에 응답한다. trace에 speech_end 등을 미리 찍어 넘길 수 있다.
+
+        opener는 미리 합성한 맞장구 PCM16 (TTS 샘플레이트). 있으면 LLM 답보다 먼저 재생한다.
+        """
         turn_id = self.guard.next_turn()
         trace = self._bind_trace(turn_id, trace)
         self.history.append({"role": "user", "content": user_text})
         result = TurnResult(trace=trace)
         await self.sink.avatar_state("thinking")
-        await self._run_turn(turn_id, result, from_llm=True)
+        await self._run_turn(turn_id, result, from_llm=True, opener=opener)
         self._commit_history(turn_id, result)
         if self._safety_task is not None:
             task, self._safety_task = self._safety_task, None
@@ -113,14 +123,15 @@ class VoicePipeline:
             tr.mark(PLAYBACK_START)
 
     async def _run_turn(self, turn_id: int, result: TurnResult, *, from_llm: bool,
-                        fixed_text: str | None = None, engine: TTSEngine | None = None) -> None:
+                        fixed_text: str | None = None, engine: TTSEngine | None = None,
+                        opener: bytes | None = None) -> None:
         q: asyncio.Queue[str | None] = asyncio.Queue(maxsize=self.queue_slots)
         if from_llm:
-            producer = self._produce_llm(turn_id, q, result)
+            producer = self._produce_llm(turn_id, q, result, strip_filler=bool(opener))
         else:
             producer = self._produce_fixed(q, fixed_text or "")
         p = self.guard.track(turn_id, asyncio.create_task(producer))
-        c = self.guard.track(turn_id, asyncio.create_task(self._consume(turn_id, q, result, engine or self.tts)))
+        c = self.guard.track(turn_id, asyncio.create_task(self._consume(turn_id, q, result, engine or self.tts, opener)))
         outs = await asyncio.gather(p, c, return_exceptions=True)
         for o in outs:
             if isinstance(o, Exception) and not isinstance(o, asyncio.CancelledError):
@@ -133,13 +144,18 @@ class VoicePipeline:
         await q.put(normalize_for_tts(text))
         await q.put(None)
 
-    async def _produce_llm(self, turn_id: int, q: asyncio.Queue, result: TurnResult) -> None:
+    async def _produce_llm(self, turn_id: int, q: asyncio.Queue, result: TurnResult,
+                           strip_filler: bool = False) -> None:
         chunker = self.chunker_factory()
         trace = result.trace
         first_chunk = True
+        examine = strip_filler   # 첫 비어 있지 않은 청크만 검사한다
 
         async def put(chunk: str) -> None:
-            nonlocal first_chunk
+            nonlocal first_chunk, examine
+            if examine and chunk.strip():
+                examine = False
+                chunk = _LEADING_FILLER.sub("", chunk, count=1)  # 맞장구와 겹치는 "네, " 제거
             text = normalize_for_tts(chunk)
             if not text:
                 return
@@ -171,11 +187,22 @@ class VoicePipeline:
             await put(chunk)
         await q.put(None)
 
-    async def _consume(self, turn_id: int, q: asyncio.Queue, result: TurnResult, engine: TTSEngine) -> None:
+    async def _consume(self, turn_id: int, q: asyncio.Queue, result: TurnResult, engine: TTSEngine,
+                       opener: bytes | None = None) -> None:
         trace = result.trace
         framer = Framer(turn_id, engine.sample_rate, self.frame_ms)
         await self.sink.begin(turn_id, engine.sample_rate)
         first_audio, speaking = True, False
+        if opener:
+            for frame in framer.push(opener):
+                if not self.guard.is_live(turn_id):
+                    return
+                await self._emit(turn_id, frame)
+                trace.mark(BACKCHANNEL)
+                result.opener_ms += frame.duration_ms
+                if not speaking:
+                    speaking = True
+                    await self.sink.avatar_state("speaking")
         while True:
             text = await q.get()
             if text is None:
@@ -215,7 +242,7 @@ class VoicePipeline:
         if not result.interrupted:
             result.spoken_text = " ".join(c.text for c in result.chunks)
         else:
-            played = self.sink.played_ms(turn_id) or 0.0
+            played = max(0.0, (self.sink.played_ms(turn_id) or 0.0) - result.opener_ms)
             parts, acc = [], 0.0
             done_ms = [c.audio_ms for c in result.chunks if c.done and c.audio_ms > 0]
             per_char = (sum(done_ms) / sum(len(c.text) for c in result.chunks if c.done and c.audio_ms > 0)
