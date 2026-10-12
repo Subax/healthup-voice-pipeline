@@ -26,7 +26,7 @@ src/voice_pipeline/
   chunker.py         SemanticChunker
   normalize.py       기호·단위·숫자·약어 → 읽을 수 있는 말
   audio.py, trace.py, sinks.py
-  stt/               STTEngine 인터페이스, SenseVoiceSTT, VADSegmenter
+  stt/               STTEngine 인터페이스, SenseVoiceSTT, Qwen3ASRSTT, VADSegmenter
   llm/               §32 이벤트(임시 스키마), MockLLM, SSE, OpenAIStreamLLM(vLLM)
   tts/               TTSEngine 인터페이스, MockTTS, CosyVoiceTTS
   bridge/            Unreal WebSocket 싱크, 프레임 형식, 서버 쪽 싱크, 가짜 Unreal 서버
@@ -47,6 +47,7 @@ tests/
 2. TTS 모델을 받는다: `docker run --rm -v $PWD/models:/models nvcr.io/nvidia/vllm:26.07-py3 hf download FunAudioLLM/Fun-CosyVoice3-0.5B-2512 --local-dir /models/Fun-CosyVoice3-0.5B-2512`
 3. STT 모델을 받는다: `csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17`의 `model.int8.onnx`, `tokens.txt`를 `models/sense-voice-int8/`에 둔다
 4. VAD 모델을 받는다: sherpa-onnx 릴리스 `asr-models`의 `silero_vad.onnx`를 `models/`에 둔다
+5. (선택) Qwen3-ASR 가중치를 받는다: `docker run --rm -v ~/.cache/huggingface:/root/.cache/huggingface nvcr.io/nvidia/vllm:26.07-py3 hf download Qwen/Qwen3-ASR-1.7B`
 
 > ⚠️ 주의: SenseVoice는 2024-07-17 모델을 쓴다. 2025-09-09 INT8 모델은 한국어를 한자 섞인 결과로 냈다.
 
@@ -57,8 +58,10 @@ tests/
 3. TTS 서버를 띄운다: `services/cosyvoice/run.sh`
 4. LLM 서버를 띄운다: `scripts/run_llm.sh` (준비까지 약 6분)
 5. LLM 준비를 확인한다: `curl -s http://127.0.0.1:8000/v1/models`
-6. 데모 서버를 띄운다: `scripts/run_demo.sh`
-7. 브라우저에서 `http://localhost:8080/`을 열고 「시작」을 누른다
+6. (선택) ASR 서버를 띄운다: `scripts/run_asr.sh` (127.0.0.1:8092, GPU 메모리 약 10GB, 준비까지 첫 실행 약 7분)
+7. ASR 준비를 확인한다: `curl -s http://127.0.0.1:8092/v1/models`
+8. 데모 서버를 띄운다: `scripts/run_demo.sh`
+9. 브라우저에서 `http://localhost:8080/`을 열고 「시작」을 누른다
 
 - 다른 PC에서 접속하면 그 PC에서 `ssh -L 8080:localhost:8080 <장비>`를 먼저 실행한다. 마이크(getUserMedia)는 localhost나 HTTPS에서만 동작한다.
 - 스피커 소리가 마이크로 들어가 barge-in이 잘못 걸리면 헤드폰을 쓴다. 또는 화면의 barge-in 선택을 끈다.
@@ -67,7 +70,8 @@ tests/
 - 설정: `scripts/run_demo.sh --first-min 2 --vad-silence-ms 500`. `--first-min`은 첫 청크 최소 글자 수, `--vad-silence-ms`는 발화 끝 판정 무음 길이다.
 - 브라우저 탭은 하나만 연다. TTS 엔진을 탭끼리 공유하므로 두 탭이 동시에 말하면 충돌한다.
 - GPU 없이 화면만 시험하려면: `scripts/run_demo.sh --llm mock --tts mock --stt mock`
-- 정지: `scripts/stop_llm.sh`, `docker rm -f healthup-cosyvoice`
+- STT 엔진은 화면에서 고른다. 「Qwen3-ASR-1.7B (GPU)」는 ASR 서버가 떠 있을 때만 선택된다. 주소는 환경변수 `QWEN3ASR_URL`로 바꾼다.
+- 정지: `scripts/stop_llm.sh`, `scripts/stop_asr.sh`, `docker rm -f healthup-cosyvoice`
 
 ## 벤치·검사 (저장소 루트에서)
 
@@ -75,8 +79,9 @@ tests/
 2. TTS 지연: `.venv/bin/python bench/tts_bench.py --engine cosyvoice3 --save-wav bench/results/cv3`
 3. TTS 발음 검사(왕복 CER): `.venv/bin/python bench/tts_roundtrip.py bench/results/cv3`
 4. STT: `.venv/bin/python bench/stt_bench.py`
-5. LLM: `.venv/bin/python bench/llm_bench.py`
-6. 지연 시뮬레이션: `.venv/bin/python bench/latency_sim.py --ttft-ms 400 --tps 40`
+5. STT 엔진 비교(SenseVoice vs Qwen3-ASR, ASR 서버 필요): `.venv/bin/python bench/stt_compare.py --both-spacing`
+6. LLM: `.venv/bin/python bench/llm_bench.py`
+7. 지연 시뮬레이션: `.venv/bin/python bench/latency_sim.py --ttft-ms 400 --tps 40`
 
 ## 새 TTS 엔진 붙이기
 

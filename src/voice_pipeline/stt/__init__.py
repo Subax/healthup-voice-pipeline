@@ -1,4 +1,4 @@
-"""STT·VAD 어댑터 (CPU, sherpa-onnx)."""
+"""STT·VAD 어댑터 (SenseVoice·VAD는 CPU sherpa-onnx, Qwen3-ASR은 로컬 GPU 서버)."""
 
 from .base import STTEngine, STTResult
 from .sensevoice import SenseVoiceSTT

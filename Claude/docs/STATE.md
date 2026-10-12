@@ -21,7 +21,7 @@
 **저장소**
 
 - git `main` @ 이 커밋 (맞장구 코드와 STATE를 함께 커밋)
-- 테스트: 124개 통과 (`.venv/bin/python -m pytest`, 약 43초)
+- 테스트: 128개 통과 (`.venv/bin/python -m pytest`, 약 43초)
 
 **구현 완료**
 
@@ -30,6 +30,7 @@
 - TTS: `services/cosyvoice/` 서버 이미지 + `tts/cosyvoice.py` 어댑터. 스트리밍·연결 끊김 시 생성 중단
 - 목소리 프리셋 (`GET /voices`): 여성 화자 하나(공식 예제). `calm`(기본), `comfort`, `warm`, `steady`(instruct 지시문), `bright`(기존). `calm2`는 삭제했다
 - 자동 톤 (`tone.py`): 화면 기본값 「자동」. SenseVoice 감정 태그와 음량·말 속도로 턴마다 톤을 고른다. 임계값은 미튜닝 추측값이다
+- STT 엔진 2개: `sensevoice`(CPU, 기본), `qwen3asr`(Qwen3-ASR-1.7B, vLLM 컨테이너 `healthup-asr` 127.0.0.1:8092, `scripts/run_asr.sh`, 메모리 약 11GB)
 - STT 후처리 (`stt/postprocess.py`): 언어 ko 고정, 한자·가나 제거, Kiwi 띄어쓰기 교정. VAD pre-roll 300ms
 - 데모 설정: `--first-min`(기본 2), `--vad-silence-ms`(기본 500), 화면의 목소리 선택
 - LLM 프롬프트: 첫 문장을 짧은 공감 문장으로, 차분한 말투, 느낌표 금지
@@ -47,9 +48,9 @@
 - 미리 합성한 안전 안내 WAV (OBJECTIVE §3-9). 지금은 같은 TTS 엔진으로 합성한다
 - Unreal 실제 연결, 립싱크
 
-**실행 중인 서비스 (2026-10-11 세션 끝 기준)**
+**실행 중인 서비스 (2026-10-12 기준)**
 
-- `healthup-llm` (vLLM, 127.0.0.1:8000), `healthup-cosyvoice` (127.0.0.1:8091), 웹 데모 (`scripts/run_demo.sh`, 127.0.0.1:8080)
+- `healthup-llm` (vLLM, 127.0.0.1:8000), `healthup-cosyvoice` (127.0.0.1:8091), `healthup-asr` (127.0.0.1:8092), 웹 데모 (`scripts/run_demo.sh`, 127.0.0.1:8080)
 - 메모리: 사용 69GB, 가용 52GB
 
 **실측 (개발 장비 AI TOP ATOM, GB10, 2026-10-11). 기능 확인용이며 최종 수치가 아니다**
@@ -69,6 +70,8 @@
 | 첫 소리 | 같은 조건, 새 프롬프트 first_min 6 | 첫 청크 P50 910 / P90 2171, 합계 P50 2538 / P90 3502ms |
 | 전 구간 | 같은 조건 + 맞장구, 3턴, 2026-10-12 | 재생 시작(맞장구) 123 / 101 / 101ms, 본문 TTS 첫 오디오 1551 / 1521 / 1561ms |
 | STT 띄어쓰기 | TTS wav 40 + ko.wav, VAD 구간 전부 이어 붙임, SenseVoice | CER(공백 제외) 0.133, 간격오류 0.123 → 0.048 (Kiwi, +0.7ms) |
+| STT 비교 | 같은 41개, VAD 구간 56개, LLM 유휴 | SenseVoice+Kiwi CER 0.133 / 간격 0.048 / P50 42ms·P90 69ms. Qwen3-ASR CER 0.072 / 간격 0.034 / P50 417ms·P90 699ms |
+| STT 데모 | 브라우저 3턴, Qwen3-ASR | STT 447ms, 재생 시작(맞장구) 509~511ms, 본문 첫 오디오 1804~2289ms |
 | 톤 프리셋 | 16문장, CER P50 / P90 / F0 중앙값(자체 추정기) | calm 0.03 / 0.38 / 222Hz, comfort 0.03 / 0.33 / 259Hz, warm 0.03 / 0.38 / 247Hz, steady 0.06 / 0.38 / 231Hz |
 | 목소리 | 40문장, CER P50 / F0 중앙값 / 초당 글자 시간 | bright 0.11 / 277Hz / 0.190초, calm 0.08 / 219Hz / 0.214초, calm2 0.12 / 127Hz / 0.277초 |
 
@@ -132,7 +135,8 @@
 - 한 일: comfort·warm·steady 프리셋(지시문 후보를 CER·F0로 선택), 자동 톤, Kiwi 띄어쓰기·한국어 전용 후처리
 - 확인: 테스트 124개 통과. 브라우저 2턴에서 "조금만 생각을 하면서 살면" 정상 띄어쓰기, STT 38~66ms
 - 톤이 실제로 위로·따뜻함으로 들리는지는 청취로 확인하지 않았다 (`bench/results/voices/`)
-- 진행 중: Qwen3-ASR-1.7B STT 엔진 추가 (사용자 선택)
+- Qwen3-ASR-1.7B 추가 (사용자 선택). vLLM 0.24가 기본 지원. 오류율은 SenseVoice의 약 절반, 지연은 약 10배
+- 확인하지 않음: LLM 생성 중 Qwen3-ASR 지연, 실제 마이크 음성 CER
 
 ### 2026-10-12 (3) — STT 선택, 중지 버튼, 맞장구 수정
 
