@@ -48,6 +48,7 @@ tests/
 3. STT 모델을 받는다: `csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17`의 `model.int8.onnx`, `tokens.txt`를 `models/sense-voice-int8/`에 둔다
 4. VAD 모델을 받는다: sherpa-onnx 릴리스 `asr-models`의 `silero_vad.onnx`를 `models/`에 둔다
 5. (선택) Qwen3-ASR 가중치를 받는다: `docker run --rm -v ~/.cache/huggingface:/root/.cache/huggingface nvcr.io/nvidia/vllm:26.07-py3 hf download Qwen/Qwen3-ASR-1.7B`
+6. 턴 종료 모델을 받는다: `pipecat-ai/smart-turn-v3`의 `smart-turn-v3.2-cpu.onnx`를 `models/smart-turn/`에 둔다 (`curl -L -o models/smart-turn/smart-turn-v3.2-cpu.onnx https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx`)
 
 > ⚠️ 주의: SenseVoice는 2024-07-17 모델을 쓴다. 2025-09-09 INT8 모델은 한국어를 한자 섞인 결과로 냈다.
 

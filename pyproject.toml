@@ -8,6 +8,8 @@ dependencies = [
     "numpy>=1.26",
     "sherpa-onnx>=1.10",
     "kiwipiepy>=0.18",
+    "onnxruntime>=1.17",
+    "transformers>=4.40",  # WhisperFeatureExtractor만 사용 (torch 불필요)
 ]
 
 [project.optional-dependencies]
