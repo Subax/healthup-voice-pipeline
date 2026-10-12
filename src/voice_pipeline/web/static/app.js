@@ -4,6 +4,8 @@ const JITTER = 0.06;        // 초기 지터 버퍼 (초)
 const PROGRESS_MS = 100;    // 재생 위치 보고 주기
 
 let ws = null, ctx = null, master = null;
+let workletLoaded = false;
+let micStream = null, micNode = null, running = false;
 let cur = null;             // 현재 재생 중인 턴
 const deadTurns = new Set();
 let speakingLocal = false, lastState = "listening";
@@ -123,6 +125,12 @@ function onHello(m) {
   voices.forEach((v) => { const o = document.createElement("option"); o.value = v.id; o.textContent = v.label || v.id; sel.appendChild(o); });
   if (m.voice) sel.value = m.voice;
   $("voiceWrap").hidden = voices.length === 0;
+  const opts = m.stt_options || [], ss = $("stt");
+  ss.textContent = "";
+  opts.forEach((o) => { const e = document.createElement("option"); e.value = o.id; e.disabled = !o.available;
+    e.textContent = (o.label || o.id) + (o.available ? "" : " (없음)"); ss.appendChild(e); });
+  if (m.stt) ss.value = m.stt;
+  $("sttWrap").hidden = opts.length === 0;
   if (m.backchannel != null) $("backchannel").checked = m.backchannel;
 }
 function onMessage(ev) {
@@ -130,9 +138,12 @@ function onMessage(ev) {
   const m = JSON.parse(ev.data);
   switch (m.type) {
     case "hello": onHello(m); break;
+    case "stt_ready": $("stt").value = m.stt; $("err").textContent = ""; break;
+    case "retranscript": addMsg("alt", `다시 인식 [${m.stt} ${fmt(m.stt_ms)}ms] ${m.text || "(빈 결과)"}`); break;
     case "avatar_state": lastState = m.state; setBadge(); break;
     case "vad": $("vad").classList.toggle("on", m.speaking); break;
-    case "transcript": addMsg("user", m.text + (m.emotion || m.event ? `  [${[m.emotion, m.event].filter(Boolean).join(", ")}]` : "")); break;
+    case "transcript": addMsg("user", m.text + (m.emotion || m.event ? `  [${[m.emotion, m.event].filter(Boolean).join(", ")}]` : "") +
+      (m.stt ? `  [${m.stt} ${fmt(m.stt_ms)}ms]` : "")); break;
     case "assistant_delta":
       if (!turnEls[m.turn_id]) turnEls[m.turn_id] = addMsg("bot", "");
       turnEls[m.turn_id].textContent += m.text; $("log").scrollTop = $("log").scrollHeight; break;
@@ -151,23 +162,28 @@ function onMessage(ev) {
 // ---------- 시작 ----------
 async function start() {
   $("start").disabled = true;
-  ctx = new AudioContext({ latencyHint: "interactive" });
-  master = ctx.createGain(); master.connect(ctx.destination);
+  if (!ctx || ctx.state === "closed") {
+    ctx = new AudioContext({ latencyHint: "interactive" });
+    master = ctx.createGain(); master.connect(ctx.destination);
+  }
   await ctx.resume();
   ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
   ws.binaryType = "arraybuffer";
   ws.onmessage = onMessage;
-  ws.onclose = () => { $("badge").textContent = "연결 끊김"; $("badge").className = "badge"; };
+  const mine = ws;
+  ws.onclose = () => { if (ws !== mine) return; running = false; $("badge").textContent = "연결 끊김"; $("badge").className = "badge";
+    setRunning(false); };
   await new Promise((res) => { ws.onopen = res; });
+  setRunning(true);
   send({ type: "config", barge_in: $("bargein").checked, backchannel: $("backchannel").checked });
   lastState = "listening"; setBadge();
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
+    micStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
-    await ctx.audioWorklet.addModule("/static/mic-worklet.js");
-    const node = new AudioWorkletNode(ctx, "mic-processor");
+    if (!workletLoaded) { await ctx.audioWorklet.addModule("/static/mic-worklet.js"); workletLoaded = true; }
+    const node = micNode = new AudioWorkletNode(ctx, "mic-processor");
     const mute = ctx.createGain(); mute.gain.value = 0;
-    ctx.createMediaStreamSource(stream).connect(node); node.connect(mute); mute.connect(ctx.destination);
+    ctx.createMediaStreamSource(micStream).connect(node); node.connect(mute); mute.connect(ctx.destination);
     node.port.onmessage = (e) => {
       const pcm = new Int16Array(e.data);
       let s = 0; for (let i = 0; i < pcm.length; i++) s += pcm[i] * pcm[i];
@@ -180,7 +196,29 @@ async function start() {
   }
 }
 
-$("start").onclick = start;
+function setRunning(on) {
+  running = on;
+  $("start").textContent = on ? "대화 중지" : "시작";
+  $("start").classList.toggle("primary", !on);
+  $("start").disabled = false;
+  $("stopAnswer").disabled = !on;
+}
+function stopAll() {
+  send({ type: "stop" });
+  if (cur && !cur.dead) { killTurn(cur, 40, false); speakingLocal = false; }
+  if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+  if (micNode) { micNode.port.onmessage = null; micNode.disconnect(); micNode = null; }
+  $("level").style.width = "0"; $("vad").classList.remove("on");
+  const old = ws; ws = null;   // onclose가 상태 표시를 덮어쓰지 않게 먼저 뗀다
+  if (old) old.onmessage = null; // 중지 뒤 늦게 오는 avatar_state가 「중지됨」을 덮지 않게 한다
+  setTimeout(() => { try { old.close(); } catch (e) {} }, 200); // stop 메시지가 나간 뒤 닫는다
+  lastState = "listening"; setRunning(false);
+  $("badge").textContent = "중지됨"; $("badge").className = "badge";
+}
+$("start").onclick = () => (running ? stopAll() : start());
+$("stopAnswer").onclick = () => send({ type: "stop" });
+$("stt").onchange = () => send({ type: "config", stt: $("stt").value });
+$("retry").onclick = () => send({ type: "retranscribe" });
 $("voice").onchange = () => send({ type: "config", voice: $("voice").value });
 $("backchannel").onchange = () => send({ type: "config", backchannel: $("backchannel").checked });
 $("bargein").onchange = () => send({ type: "config", barge_in: $("bargein").checked });

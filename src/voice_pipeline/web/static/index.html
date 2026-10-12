@@ -34,6 +34,7 @@ input[type=text] { font:inherit; padding:6px 10px; border:1px solid var(--line);
 .msg.user { align-self:flex-end; background:var(--accent); color:#fff; }
 .msg.bot { align-self:flex-start; background:var(--bg); border:1px solid var(--line); }
 .msg.cut::after { content:" (끊김)"; color:var(--bad); font-size:12px; }
+.msg.alt { align-self:flex-end; background:var(--line); color:var(--muted); font-size:13px; }
 .hint { color:var(--muted); font-size:12px; }
 table { width:100%; border-collapse:collapse; font-size:13px; font-variant-numeric:tabular-nums; }
 th, td { text-align:right; padding:3px 6px; border-bottom:1px solid var(--line); }
@@ -49,8 +50,10 @@ th { color:var(--muted); font-weight:600; }
     <div class="row">
       <span id="engines" class="hint"></span>
       <label id="voiceWrap" class="hint" hidden>목소리 <select id="voice"></select></label>
+      <label id="sttWrap" class="hint" hidden>STT <select id="stt"></select></label>
       <span id="badge" class="badge">대기</span>
       <button id="start" class="primary">시작</button>
+      <button id="stopAnswer" disabled>답변 멈춤</button>
     </div>
   </header>
 
@@ -64,6 +67,7 @@ th { color:var(--muted); font-weight:600; }
       <label><input type="checkbox" id="bargein" checked> 끼어들기(barge-in)</label>
       <label><input type="checkbox" id="backchannel" checked> 맞장구</label>
       <button id="reset">대화 초기화</button>
+      <button id="retry" title="마지막 마이크 발화를 현재 STT로 다시 인식 (새 턴 없음)">다시 인식</button>
     </div>
     <p class="hint">에코로 아바타 소리에 스스로 끊기면 헤드폰을 쓰세요. 끼어들기를 끄면 아바타가 말하는 동안 마이크를 무시합니다(반이중).</p>
   </section>

@@ -17,10 +17,13 @@ from .tts.base import TTSEngine
 
 log = logging.getLogger("voice_pipeline.backchannel")
 
-DEFAULT_PHRASES = ("네.", "음.", "아, 네.")
+DEFAULT_PHRASES = ("네.", "아, 네.", "네, 네.")
 
 SILENCE_THRESHOLD = 0.02   # 최대 진폭 대비 비율. 이보다 작으면 무음으로 본다
-KEEP_PAD_MS = 30           # 앞뒤에 남기는 여유
+KEEP_PAD_MS = 60           # 앞뒤에 남기는 여유
+FADE_IN_MS = 15            # 시작 클릭 방지
+FADE_OUT_MS = 30           # 끝 클릭 방지
+MIN_MS, MAX_MS = 250, 1200  # 이 밖의 길이는 맞장구로 쓰지 않는다 (너무 짧으면 클릭음, 길면 답변)
 
 
 def trim_silence(pcm: bytes, sample_rate: int, *, threshold: float = SILENCE_THRESHOLD,
@@ -33,6 +36,18 @@ def trim_silence(pcm: bytes, sample_rate: int, *, threshold: float = SILENCE_THR
     pad = sample_rate * pad_ms // 1000
     lo, hi = max(0, int(loud[0]) - pad), min(len(x), int(loud[-1]) + 1 + pad)
     return x[lo:hi].tobytes()
+
+
+def apply_fades(pcm: bytes, sample_rate: int, *, fade_in_ms: int = FADE_IN_MS,
+                fade_out_ms: int = FADE_OUT_MS) -> bytes:
+    """앞에 선형 페이드인, 뒤에 선형 페이드아웃을 건다 (int16)."""
+    x = np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype=np.int16).astype(np.float32)
+    n_in, n_out = min(len(x), sample_rate * fade_in_ms // 1000), min(len(x), sample_rate * fade_out_ms // 1000)
+    if n_in:
+        x[:n_in] *= np.arange(n_in, dtype=np.float32) / n_in
+    if n_out:
+        x[len(x) - n_out:] *= np.arange(n_out, 0, -1, dtype=np.float32) / n_out
+    return np.round(x).astype(np.int16).tobytes()
 
 
 class BackchannelBank:
@@ -59,12 +74,15 @@ class BackchannelBank:
                 for text in self.phrases:
                     try:
                         pcm = b"".join([c async for c in tts.stream(text)])
-                        pcm = trim_silence(pcm, tts.sample_rate)
+                        pcm = apply_fades(trim_silence(pcm, tts.sample_rate), tts.sample_rate)
                     except Exception:
                         log.exception("맞장구 합성 실패: voice=%s text=%r", voice, text)
                         continue
-                    if pcm:
-                        items.append((text, pcm))
+                    ms = len(pcm) // 2 * 1000 / tts.sample_rate
+                    if not (MIN_MS <= ms <= MAX_MS):
+                        log.warning("맞장구 길이 범위 밖, 버림: voice=%s text=%r %.0fms", voice, text, ms)
+                        continue
+                    items.append((text, pcm))
                 if items:
                     self._items[key] = items
         finally:

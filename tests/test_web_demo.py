@@ -224,3 +224,70 @@ async def test_backchannel_absent_hello_false():
         await ws.close()
     finally:
         await c.close()
+
+
+async def test_stt_options_unavailable_and_switch(monkeypatch):
+    from voice_pipeline.stt.registry import STT_ENGINES, STTSpec
+    monkeypatch.setitem(STT_ENGINES, "alt", STTSpec("alt", "대체", lambda: MockSTT("대체 인식"), lambda: True))
+    monkeypatch.setitem(STT_ENGINES, "gone", STTSpec("gone", "없음", lambda: MockSTT("x"), lambda: False))
+    eng = Engines(MockLLM(ttft_ms=20, tokens_per_s=400), MockTTS(first_audio_ms=10, rtf=0.5),
+                  MockSTT("마이크 테스트"), lambda: EnergyVAD(min_silence_ms=100), {"llm": "mock", "tts": "mock", "stt": "mock"})
+    c = TestClient(TestServer(create_app(eng)))
+    await c.start_server()
+    try:
+        ws = await c.ws_connect("/ws")
+        hello = await recv(ws)
+        opts = {o["id"]: o["available"] for o in hello["stt_options"]}
+        assert hello["stt"] == "mock" and opts["mock"] and opts["alt"] and not opts["gone"]
+        await ws.send_json({"type": "config", "stt": "gone"})
+        assert (await until(ws, is_type("error"), []))["message"]
+        await ws.send_json({"type": "config", "stt": "nope"})
+        assert (await until(ws, is_type("error"), []))["message"]
+        await ws.send_json({"type": "config", "stt": "alt"})
+        assert (await until(ws, is_type("stt_ready"), []))["stt"] == "alt"
+        for _ in range(3):
+            await ws.send_bytes(LOUD)
+        for _ in range(10):
+            await ws.send_bytes(QUIET)
+        t = await until(ws, is_type("transcript"), [])
+        assert t["text"] == "대체 인식" and t["stt"] == "alt" and "stt_ms" in t
+        # 다시 인식: 새 턴 없이 결과만
+        await until(ws, is_type("turn_done"), [])
+        await ws.send_json({"type": "config", "stt": "mock"})
+        await until(ws, is_type("stt_ready"), [])
+        await ws.send_json({"type": "retranscribe"})
+        msgs: list = []
+        r = await until(ws, is_type("retranscript"), msgs)
+        assert r["stt"] == "mock" and r["text"] == "마이크 테스트"
+        try:
+            while True:
+                msgs.append(await recv(ws, timeout=0.4))
+        except asyncio.TimeoutError:
+            pass
+        assert not any(isinstance(m, dict) and m["type"] in ("turn_done", "audio_begin", "transcript") for m in msgs)
+        await ws.close()
+    finally:
+        await c.close()
+
+
+async def test_retranscribe_without_mic_errors(client):
+    ws = await client.ws_connect("/ws")
+    await recv(ws)
+    await ws.send_json({"type": "retranscribe"})
+    assert (await until(ws, is_type("error"), []))["message"]
+    await ws.close()
+
+
+async def test_stop_interrupts_and_returns_to_listening(client):
+    ws = await client.ws_connect("/ws")
+    await recv(ws)
+    await ws.send_json({"type": "text_input", "text": "길게 말해줘"})
+    msgs: list = []
+    await until(ws, lambda m: isinstance(m, tuple), msgs)
+    await ws.send_json({"type": "stop"})
+    done = await until(ws, is_type("turn_done"), msgs)
+    assert done["interrupted"]
+    assert any(isinstance(m, dict) and m["type"] == "interrupt" for m in msgs)
+    st = await until(ws, lambda m: isinstance(m, dict) and m["type"] == "avatar_state" and m["state"] == "listening", msgs)
+    assert st["state"] == "listening"
+    await ws.close()

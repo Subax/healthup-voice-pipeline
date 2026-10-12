@@ -12,6 +12,7 @@ from voice_pipeline.trace import BACKCHANNEL, TTS_FIRST_AUDIO
 from voice_pipeline.tts.mock import MockTTS
 
 RATE = 24000
+TONE = 7200   # 300 ms
 
 
 class PaddedTTS:
@@ -24,7 +25,7 @@ class PaddedTTS:
 
     async def stream(self, text):
         self.seen.append(self.voice)
-        tone = (0.5 * np.sin(np.arange(2400) / 5) * 32767).astype(np.int16)
+        tone = (0.5 * np.sin(np.arange(TONE) / 5) * 32767).astype(np.int16)
         yield np.zeros(RATE // 2, dtype=np.int16).tobytes()
         yield tone.tobytes()
         yield np.zeros(RATE // 2, dtype=np.int16).tobytes()
@@ -49,8 +50,8 @@ async def test_bank_trims_silence_and_restores_voice(tmp_path):
     assert tts.voice == "orig" and tts.seen == ["a", "b"]
     _, pcm = bank.pick("a")
     n = len(pcm) // 2
-    pad = RATE * 30 // 1000
-    assert len(pcm) % 2 == 0 and 2400 <= n <= 2400 + 2 * pad
+    pad = RATE * 60 // 1000
+    assert len(pcm) % 2 == 0 and TONE <= n <= TONE + 2 * pad
     paths = bank.save_wavs(tmp_path, RATE)
     assert sorted(p.name for p in paths) == ["a_0.wav", "b_0.wav"]
 
@@ -58,14 +59,39 @@ async def test_bank_trims_silence_and_restores_voice(tmp_path):
 async def test_bank_skips_failed_phrase():
     class Flaky(PaddedTTS):
         async def stream(self, text):
-            if text == "음.":
+            if text == "아, 네.":
                 raise RuntimeError("fail")
             async for c in super().stream(text):
                 yield c
 
     bank = BackchannelBank()
     await bank.prepare(Flaky(), ["x"])
-    assert {bank.pick("x")[0] for _ in range(20)} <= {"네.", "아, 네."}
+    assert {bank.pick("x")[0] for _ in range(20)} <= {"네.", "네, 네."}
+
+
+async def test_fades_applied_to_clip():
+    bank = BackchannelBank(phrases=("네.",))
+    await bank.prepare(PaddedTTS(), [None])
+    x = np.frombuffer(bank.pick(None)[1], dtype=np.int16)
+    assert abs(int(x[0])) <= 2 and abs(int(x[-1])) <= 2
+    assert np.abs(x).max() > 5000
+
+
+async def test_duration_filter_drops_short_and_long():
+    class Dur(PaddedTTS):
+        def __init__(self, n):
+            self.n = n
+
+        async def stream(self, text):
+            yield (0.5 * np.sin(np.arange(self.n) / 5) * 32767).astype(np.int16).tobytes()
+
+    for n in (RATE * 100 // 1000, RATE * 1500 // 1000):   # 100 ms, 1.5 s
+        bank = BackchannelBank(phrases=("네.",))
+        await bank.prepare(Dur(n), [None])
+        assert bank.pick(None) is None
+    bank = BackchannelBank(phrases=("네.",))
+    await bank.prepare(Dur(RATE * 500 // 1000), [None])
+    assert bank.pick(None) is not None
 
 
 def _opener(ms=200):

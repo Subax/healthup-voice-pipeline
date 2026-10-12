@@ -57,6 +57,12 @@ class DemoSession:
         self._bg: set[asyncio.Task] = set()
         self._muted = False                 # 반이중 중 마이크 무시 상태
         self._closed = False
+        self.stt_id = engines.stt_id        # STT 선택은 세션마다
+        self._stt_switch: asyncio.Task | None = None
+        self._last_pcm: bytes | None = None  # 마지막 마이크 발화 (다시 인식용)
+
+    def _stt(self) -> Any:
+        return self.engines._stt_cache[self.stt_id]
 
     # ---------- 전송 ----------
 
@@ -69,7 +75,8 @@ class DemoSession:
         await self.send({"type": "hello", "engines": self.engines.labels, "barge_in": self.barge_in_enabled,
                          "backchannel": self.backchannel_enabled,
                          "first_min": self.engines.first_min, "vad_silence_ms": self.engines.vad_silence_ms,
-                         "voices": voices, "voice": getattr(tts, "voice", None)})
+                         "voices": voices, "voice": getattr(tts, "voice", None),
+                         "stt_options": self.engines.stt_options(), "stt": self.stt_id})
 
     async def _on_token(self, turn_id: int, text: str) -> None:
         await self.send({"type": "assistant_delta", "turn_id": turn_id, "text": text})
@@ -146,10 +153,58 @@ class DemoSession:
                 ids = {v.get("id") for v in (getattr(self.engines.tts, "voices", None) or [])}
                 if voice in ids:
                     self.engines.tts.voice = voice
+            stt_id = msg.get("stt")
+            if isinstance(stt_id, str) and stt_id:
+                await self._switch_stt(stt_id)
+        elif kind == "retranscribe":
+            self._spawn(self._retranscribe())
+        elif kind == "stop":
+            await self._stop_current()
+            await self.send({"type": "avatar_state", "state": "listening"})
         elif kind == "reset":
             await self._stop_current()
             self.pipeline.history.clear()
             await self.send({"type": "reset_done"})
+
+    # ---------- STT 선택 ----------
+
+    async def _switch_stt(self, stt_id: str) -> None:
+        """STT를 바꾼다. 로드하는 동안은 이전 엔진을 그대로 쓴다."""
+        if not self.engines.stt_usable(stt_id):
+            await self.send({"type": "error", "message": f"쓸 수 없는 STT: {stt_id}"})
+            return
+        if self._stt_switch is not None and not self._stt_switch.done():
+            self._stt_switch.cancel()
+        self._stt_switch = asyncio.get_running_loop().create_task(self._load_stt(stt_id))
+        self._bg.add(self._stt_switch)
+        self._stt_switch.add_done_callback(self._bg.discard)
+
+    async def _load_stt(self, stt_id: str) -> None:
+        try:
+            await self.engines.get_stt(stt_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.exception("STT 로드 실패: %s", stt_id)
+            await self.send({"type": "error", "message": f"STT 로드 실패({stt_id}): {type(e).__name__}: {e}"})
+            return
+        self.stt_id = stt_id
+        await self.send({"type": "stt_ready", "stt": stt_id})
+
+    async def _retranscribe(self) -> None:
+        """마지막 마이크 발화를 현재 STT로 다시 인식한다. 새 턴은 만들지 않는다."""
+        if self._last_pcm is None:
+            await self.send({"type": "error", "message": "다시 인식할 마이크 발화가 없습니다"})
+            return
+        stt_id = self.stt_id
+        try:
+            r = await self._stt().transcribe(self._last_pcm)
+        except Exception as e:
+            log.exception("다시 인식 오류")
+            await self.send({"type": "error", "message": f"{type(e).__name__}: {e}"})
+            return
+        await self.send({"type": "retranscript", "stt": stt_id, "text": (r.text or "").strip(),
+                         "stt_ms": round(float(r.elapsed_ms), 1)})
 
     # ---------- 턴 ----------
 
@@ -172,16 +227,18 @@ class DemoSession:
 
     async def _run_turn(self, trace: TurnTrace, pcm16: bytes | None, text: str | None) -> None:
         stt_ms, emotion, event = 0.0, None, None
+        stt_id = self.stt_id
         try:
             self._stage = "stt"
             if pcm16 is not None:
-                r = await self.engines.stt.transcribe(pcm16)
+                self._last_pcm = pcm16
+                r = await self._stt().transcribe(pcm16)
                 text, stt_ms = (r.text or "").strip(), float(r.elapsed_ms)
                 emotion, event = getattr(r, "emotion", None), getattr(r, "event", None)
             trace.mark(STT_FINAL)
             if not text:
                 return
-            await self.send({"type": "transcript", "text": text, "stt_ms": round(stt_ms, 1),
+            await self.send({"type": "transcript", "text": text, "stt": stt_id, "stt_ms": round(stt_ms, 1),
                              "emotion": emotion, "event": event})
             self._stage = "respond"
             opener = None
