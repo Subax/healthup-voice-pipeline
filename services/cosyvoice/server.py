@@ -113,8 +113,9 @@ class Engine:
         self.model_dir = model_dir
         self.cancel = threading.Event()
         # model.tts 는 스트리밍 중 token_hop_len 을 키우고 되돌리지 않는다 -> 요청마다 초기값으로 리셋
-        if os.environ.get("CV_HOP"):
-            self.cv.model.token_hop_len = int(os.environ["CV_HOP"])
+        # 첫 오디오까지 모으는 토큰 수. 25(공식 기본) → 10: 단독 TTFA P50 787 → 507ms, 왕복 CER 같음 (2026-10-21,
+        # bench/hop_sweep.sh). 6은 TTFA가 더 줄지 않고 CER·RTF가 나빠졌다. 청취 확인은 하지 않았다
+        self.cv.model.token_hop_len = int(os.environ.get("CV_HOP", "10"))
         self.hop0: int = self.cv.model.token_hop_len
         self._patch_llm()
         if os.environ.get("CV_PROF"):
