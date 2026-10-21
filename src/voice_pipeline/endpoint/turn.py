@@ -18,6 +18,11 @@ STT가 멈춘 경우: 마지막 멈춤으로부터 `STT_HARD_TIMEOUT_MS`(3초)�
 (상한 1초를 넘겨도 전사가 곧 오면 그것을 쓰기 위해서다). 3초가 지나도 응답이 없으면
 STT 호출을 취소하고, 그때까지 얻은 전사로 확정한다. 전사가 하나도 없으면 턴을 버린다.
 취소해도 엔진 안의 스레드 작업은 멈추지 않을 수 있다 (확인하지 않았다).
+
+선행 생성 훅 (선택): `on_speculate(text, utt_id, last_result, pcm16)`는 대기에 들어간 직후,
+남은 대기가 `SPECULATE_MIN_REMAINING_MS` 이상이고 판단 규칙이 `SPECULATE_RULES`(말이 끝났을 가능성이 높은 규칙)일 때만 부른다.
+`on_speculate_cancel()`은 재개·reset·새 멈춤으로 텍스트가 달라질 때·dropped일 때 한 번만 부른다.
+확정(`_confirm`)으로 넘어가면 취소를 부르지 않는다. 확정 콜백이 선행 결과를 쓰거나 버린다.
 """
 
 from __future__ import annotations
@@ -42,6 +47,9 @@ STT_HARD_TIMEOUT_MS = 3000   # 멈춤 뒤 STT 응답을 기다리는 최대 시�
 RESUMED_REASON = "대기 중 다시 말함"
 REOPEN_REASON = "확정 직후 다시 말함 → 같은 턴으로 이어 붙임"
 ONSET_NOISE_MS = 400         # VoiceOnset 뒤 SpeechStart·SpeechEnd가 없으면 잡음으로 본다
+SPECULATE_MIN_REMAINING_MS = 60   # 남은 대기가 이보다 짧으면 선행하지 않는다
+# 말이 끝났을 가능성이 높은 규칙만 선행한다. 연결 어미·조사·머뭇거림(EC, NOUN, JX_JK, IC)은 말이 이어지기 쉽다.
+SPECULATE_RULES = frozenset({"EF_HIGH", "EF_LOW", "EC_YO_HIGH", "EC_YO_LOW", "NONE_HIGH"})
 
 
 @dataclass
@@ -86,7 +94,12 @@ class TurnEndpointer:
                  clock: Callable[[], float] = time.monotonic,
                  utt_id_factory: Callable[[], int] | None = None,
                  score_timeout_s: float = SCORE_TIMEOUT_S,
-                 stt_hard_timeout_ms: int = STT_HARD_TIMEOUT_MS) -> None:
+                 stt_hard_timeout_ms: int = STT_HARD_TIMEOUT_MS,
+                 on_speculate: Callable[[str, int, Any, bytes], Awaitable[None]] | None = None,
+                 on_speculate_cancel: Callable[[], Awaitable[None]] | None = None) -> None:
+        self._on_spec, self._on_spec_cancel = on_speculate, on_speculate_cancel
+        self._spec_text: str | None = None   # 지금 선행 중인 텍스트. None이면 선행 없음
+        self._spec_tasks: set[asyncio.Task] = set()
         self._stt, self._scorer = stt, scorer
         self._emit_cb, self._on_confirm = emit, on_confirm
         self._stt_id, self._mode, self._log_dir = stt_id, mode, log_dir
@@ -152,6 +165,7 @@ class TurnEndpointer:
             self._cancel(self._timer)
             self._timer = None
             await self._emit(self._event("resumed", reason=RESUMED_REASON, rule_id="RESUMED"))
+        await self._spec_cancel()
 
     async def on_voice_onset(self) -> None:
         """말소리가 막 시작된 것 같다 (SpeechStart보다 빠른 신호, 잡음일 수 있다).
@@ -173,6 +187,7 @@ class TurnEndpointer:
             self._cancel(self._timer)
             self._timer = None
             await self._emit(self._event("resumed", reason=RESUMED_REASON, rule_id="RESUMED"))
+        await self._spec_cancel()
         self._cancel(self._onset)
         self._onset = asyncio.get_running_loop().create_task(self._onset_watch(self._seq))
 
@@ -198,6 +213,7 @@ class TurnEndpointer:
             await self._emit(self._event("waiting", since=max(0.0, wait_ms - left * 1000)))
             self._cancel(self._timer)
             self._timer = asyncio.get_running_loop().create_task(self._wait_then_confirm(self._deadline, seq))
+            await self._maybe_speculate(self._eval.get("rule_id", ""))
         else:  # 재개한 턴(reopen)은 평가가 없다. 다시 평가한다
             stt_ms = self._segs[-1].stt_ms if self._segs else 0.0
             self._worker = asyncio.get_running_loop().create_task(self._evaluate(self._utt, seq, stt_ms))
@@ -217,7 +233,53 @@ class TurnEndpointer:
         for t in (self._timer, self._cap, self._worker, self._onset):
             self._cancel(t)
         self._timer = self._cap = self._worker = self._onset = None
+        self._spec_cancel_nowait()
         self._reset_turn()
+
+    # ---------- 선행 생성 ----------
+
+    async def _spec_cancel(self) -> None:
+        if self._spec_text is None:
+            return
+        self._spec_text = None
+        if self._on_spec_cancel is not None:
+            try:
+                await self._on_spec_cancel()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("선행 취소 콜백 오류")
+
+    def _spec_cancel_nowait(self) -> None:
+        """동기 문맥(reset)에서 취소한다. 취소 콜백은 백그라운드 작업으로 돈다."""
+        if self._spec_text is None:
+            return
+        try:
+            t = asyncio.get_running_loop().create_task(self._spec_cancel())
+        except RuntimeError:
+            self._spec_text = None
+            return
+        self._spec_tasks.add(t)
+        t.add_done_callback(self._spec_tasks.discard)
+
+    async def _maybe_speculate(self, rule_id: str) -> None:
+        """대기에 들어간 직후 부른다. 조건이 맞으면 on_speculate, 달라졌으면 이전 선행을 취소한다."""
+        text = self._text()
+        remain_ms = ((self._deadline or self._clock()) - self._clock()) * 1000
+        ok = (self._on_spec is not None and bool(text) and rule_id in SPECULATE_RULES
+              and remain_ms >= SPECULATE_MIN_REMAINING_MS)
+        if self._spec_text is not None and (not ok or self._spec_text != text):
+            await self._spec_cancel()
+        if not ok or self._spec_text is not None:
+            return
+        self._spec_text = text
+        try:
+            await self._on_spec(text, self._utt or 0, self._last_result, b"".join(self._audio))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("선행 콜백 오류")
+            self._spec_text = None
 
     # ---------- 내부 ----------
 
@@ -297,6 +359,7 @@ class TurnEndpointer:
         if self._speaking:  # 판단이 끝나기 전에 이미 다시 말하고 있다
             self._susp_left = d.wait_ms / 1000
             await self._emit(self._event("resumed", reason=RESUMED_REASON, rule_id="RESUMED"))
+            await self._spec_cancel()
             return
         now = self._clock()
         deadline = self._pause_start + d.wait_ms / 1000
@@ -310,6 +373,7 @@ class TurnEndpointer:
         await self._emit(self._event("waiting"))
         self._cancel(self._timer)
         self._timer = asyncio.get_running_loop().create_task(self._wait_then_confirm(deadline, seq))
+        await self._maybe_speculate(d.rule_id)
 
     async def _wait_then_confirm(self, deadline: float, seq: int) -> None:
         await asyncio.sleep(max(0.0, deadline - self._clock()))
@@ -335,6 +399,10 @@ class TurnEndpointer:
         for t in (self._timer, self._cap, self._onset):
             self._cancel(t)
         self._timer = self._cap = self._onset = None
+        if text:
+            self._spec_text = None   # 취소를 부르지 않는다. 확정 콜백이 선행 결과를 쓰거나 버린다
+        else:
+            await self._spec_cancel()
         self._reset_turn()  # 콜백을 기다리는 동안 들어오는 멈춤은 새 턴이다
         await self._emit(ev)
         if text:

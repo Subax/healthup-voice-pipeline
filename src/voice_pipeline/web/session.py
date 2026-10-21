@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
 from aiohttp import web
@@ -26,7 +27,7 @@ from aiohttp import web
 from ..bridge.ws_server_sink import WebSocketServerSink
 from ..llm.events import LLMClient, LLMEvent, Token
 from ..chunker import SemanticChunker
-from ..pipeline import VoicePipeline
+from ..pipeline import PendingTurn, VoicePipeline
 from ..trace import (BACKCHANNEL, FIRST_CHUNK, LLM_FIRST_TOKEN, PLAYBACK_START, SPEECH_END, STT_FINAL,
                      TTS_FIRST_AUDIO, TURN_CONFIRMED, TurnTrace)
 from ..endpoint.turn import ConfirmedTurn, TurnEndpointer
@@ -59,6 +60,21 @@ class TeeLLM:
             yield ev
 
 
+@dataclass
+class _Spec:
+    """선행 생성 중인 턴과 확정 전까지 보관하는 UI 메시지 (assistant_delta)."""
+
+    pt: PendingTurn
+    text: str
+    trace: TurnTrace
+    tone: str | None
+    emotion: str | None
+    event: str | None
+    deltas: list[tuple[int, str]] = field(default_factory=list)
+    held: bool = True         # True인 동안 assistant_delta를 보관한다
+    claimed: bool = False     # 확정되어 응답 작업이 넘겨받았다
+
+
 class DemoSession:
     def __init__(self, ws: web.WebSocketResponse, engines: Engines):
         self.engines = engines
@@ -69,12 +85,16 @@ class DemoSession:
         self._pipeline_listener = self.sink.playback_listener
         self.sink.playback_listener = self._on_playback
         self._utt_seq = 0                   # 사용자 발화 번호
+        self.speculate = bool(getattr(engines, "speculate", True))  # 선행 생성 (대기 중 LLM·TTS 먼저)
+        self._spec: _Spec | None = None
         self.endpoint_mode = engines.endpoint_default if engines.endpoint_default in ("smart", "fixed") else "smart"
         self.vad = self._new_vad()
         self.endpointer = TurnEndpointer(
             lambda: self._stt(), engines.endpoint_scorer, self._emit_turn_eval, self._on_turn_confirmed,
             stt_id=lambda: self.stt_id, mode=lambda: self.endpoint_mode, log_dir=engines.endpoint_log_dir,
-            utt_id_factory=self._next_utt)
+            utt_id_factory=self._next_utt,
+            on_speculate=self._on_speculate if self.speculate else None,
+            on_speculate_cancel=self._on_speculate_cancel if self.speculate else None)
         self.barge_in_enabled = True
         self.backchannel_enabled = engines.backchannel is not None
         self._task: asyncio.Task | None = None
@@ -127,6 +147,10 @@ class DemoSession:
                          "endpoint": self.endpoint_mode, "endpoint_options": ENDPOINT_OPTIONS})
 
     async def _on_token(self, turn_id: int, text: str) -> None:
+        sp = self._spec
+        if sp is not None and sp.held and sp.pt.turn_id == turn_id:  # 확정 전에는 UI로 보내지 않는다
+            sp.deltas.append((turn_id, text))
+            return
         await self.send({"type": "assistant_delta", "turn_id": turn_id, "text": text})
 
     def _on_playback(self, turn_id: int, event: str, played_ms: float) -> None:
@@ -221,6 +245,7 @@ class DemoSession:
             ep = msg.get("endpoint")
             if ep in ("smart", "fixed") and ep != self.endpoint_mode:
                 self.endpointer.reset()  # 대기 중이던 턴은 버린다
+                await self._abort_spec()
                 self._last_confirm = None
                 self.endpoint_mode = ep
                 self.vad = self._new_vad()
@@ -280,8 +305,59 @@ class DemoSession:
 
     # ---------- 턴 ----------
 
-    async def _stop_current(self) -> None:
-        """진행 중 STT/응답/재생을 멈춘다."""
+    # ---------- 선행 생성 ----------
+
+    def _pick_opener(self) -> bytes | None:
+        bank = self.engines.backchannel
+        if self.backchannel_enabled and bank is not None:
+            picked = bank.pick(getattr(self.engines.tts, "voice", None))
+            return picked[1] if picked else None
+        return None
+
+    async def _on_speculate(self, text: str, utt_id: int, last: Any, pcm16: bytes) -> None:
+        """대기 중 이미 아는 전사로 LLM·TTS를 먼저 돌린다. 확정 전에는 브라우저로 아무것도 보내지 않는다.
+
+        응답·재생이 진행 중이면 선행하지 않는다 (barge-in 경로를 건드리지 않는다).
+        """
+        if self._closed or self.endpoint_mode != "smart":
+            return
+        if self._busy() or (self._task is not None and not self._task.done()):
+            return
+        await self._abort_spec()
+        emotion, event = getattr(last, "emotion", None), getattr(last, "event", None)
+        tone = self._apply_tone(emotion, pcm16, text) if self._auto_active() else None
+        trace = TurnTrace(0)
+        pt = await self.pipeline.prepare(text, trace=trace, opener=self._pick_opener())
+        self._spec = _Spec(pt, text, trace, tone, emotion, event)  # prepare 직후, 첫 토큰보다 먼저 보관한다
+        log.debug("선행 생성 시작 utt=%s turn=%s text=%r", utt_id, pt.turn_id, text)
+
+    async def _on_speculate_cancel(self) -> None:
+        sp = self._spec
+        if sp is not None and not sp.claimed:
+            log.debug("선행 생성 취소 turn=%s", sp.pt.turn_id)
+            await self._abort_spec()
+
+    async def _abort_spec(self) -> None:
+        """보관 중인 선행 턴을 버린다. 싱크로는 아무것도 가지 않고 history는 prepare 이전으로 돌아간다."""
+        sp, self._spec = self._spec, None
+        if sp is not None:
+            sp.held = False
+            sp.deltas.clear()
+            await sp.pt.abort()
+
+    async def _release_spec_ui(self, sp: _Spec) -> None:
+        """보관했던 assistant_delta를 순서대로 보낸다. 비는 것을 확인한 직후 await 없이 보관을 끈다."""
+        while sp.deltas:
+            tid, text = sp.deltas.pop(0)
+            await self.send({"type": "assistant_delta", "turn_id": tid, "text": text})
+        sp.held = False
+
+    # ---------- 턴 중단 ----------
+
+    async def _stop_current(self, keep_spec: _Spec | None = None) -> None:
+        """진행 중 STT/응답/재생을 멈춘다. 보관 중인 선행 턴도 버린다 (keep_spec 제외)."""
+        if self._spec is not None and self._spec is not keep_spec:
+            await self._abort_spec()
         t = self._task
         running = t is not None and not t.done()
         if running and self._stage == "stt":
@@ -293,13 +369,24 @@ class DemoSession:
 
     async def _on_turn_confirmed(self, turn: ConfirmedTurn) -> None:
         """smart: 턴이 확정됐다. 이미 아는 전사로 응답 경로를 시작한다 (STT 생략)."""
-        trace = TurnTrace(0)
-        trace.mark(SPEECH_END, turn.pause_start)
-        trace.mark(STT_FINAL, turn.stt_done)
-        trace.mark(TURN_CONFIRMED, turn.confirm_time)
+        sp = self._spec
+        if sp is not None and sp.pt.state == "pending" and sp.text == turn.text and not self._closed:
+            sp.claimed = True      # 선행 결과를 쓴다
+            trace = sp.trace       # 선행 시작 때 찍은 마크는 두고, 확정 기준 마크는 덮어쓴다
+            trace.marks[SPEECH_END] = turn.pause_start
+            trace.marks[STT_FINAL] = turn.stt_done
+            trace.marks[TURN_CONFIRMED] = turn.confirm_time
+            hl = sp.pt.hist_len    # user 메시지는 이미 history에 있다. 되돌릴 길이는 prepare 이전
+        else:
+            await self._abort_spec()   # 텍스트가 다르거나 선행이 없다. 지금 경로로 새로 시작한다
+            sp, hl = None, None
+            trace = TurnTrace(0)
+            trace.mark(SPEECH_END, turn.pause_start)
+            trace.mark(STT_FINAL, turn.stt_done)
+            trace.mark(TURN_CONFIRMED, turn.confirm_time)
         self._last_pcm = turn.pcm16
-        self._last_confirm = {"turn": turn, "t": time.monotonic(), "trace": trace, "hl": None}
-        await self._start_turn(trace, pcm16=turn.pcm16, text=turn.text, known=turn)
+        self._last_confirm = {"turn": turn, "t": time.monotonic(), "trace": trace, "hl": hl}
+        await self._start_turn(trace, pcm16=turn.pcm16, text=turn.text, known=turn, spec=sp)
 
     async def _maybe_reopen(self) -> bool:
         """확정 직후(RESUME_MERGE_MS 안) 본 응답 소리 전에 다시 말하면 판단을 버리고 턴을 이어 붙인다."""
@@ -322,12 +409,13 @@ class DemoSession:
         return True
 
     async def _start_turn(self, trace: TurnTrace, *, pcm16: bytes | None = None, text: str | None = None,
-                          known: ConfirmedTurn | None = None) -> None:
-        await self._stop_current()
+                          known: ConfirmedTurn | None = None, spec: _Spec | None = None) -> None:
+        await self._stop_current(keep_spec=spec)
         if self._closed:
+            await self._abort_spec()
             return
         utt_id = known.utt_id if known is not None else self._next_utt()
-        self._task = asyncio.create_task(self._run_turn(trace, pcm16, text, utt_id, known))
+        self._task = asyncio.create_task(self._run_turn(trace, pcm16, text, utt_id, known, spec))
 
     def _apply_tone(self, emotion: str | None, pcm16: bytes | None, text: str) -> str:
         """auto: 감정·음향 특징으로 톤을 골라 이번 턴의 TTS 목소리로 쓴다. 서버에 없는 톤이면 calm."""
@@ -339,7 +427,7 @@ class DemoSession:
         return tone
 
     async def _run_turn(self, trace: TurnTrace, pcm16: bytes | None, text: str | None, utt_id: int,
-                        known: ConfirmedTurn | None = None) -> None:
+                        known: ConfirmedTurn | None = None, spec: _Spec | None = None) -> None:
         stt_ms, emotion, event = 0.0, None, None
         stt_id = self.stt_id
         try:
@@ -355,19 +443,31 @@ class DemoSession:
             trace.mark(STT_FINAL)
             if not text:
                 return
-            tone = self._apply_tone(emotion, pcm16, text) if self._auto_active() else None
-            if known is not None and self._last_confirm is not None and self._last_confirm["turn"] is known:
-                self._last_confirm["hl"] = len(self.pipeline.history)
-            await self.send({"type": "transcript", "utt_id": utt_id, "turn_id": self.pipeline.guard.current + 1,
+            if spec is not None:   # 톤·맞장구는 선행 시작 때 이미 골랐다
+                tone, turn_id = spec.tone, spec.pt.turn_id
+            else:
+                tone = self._apply_tone(emotion, pcm16, text) if self._auto_active() else None
+                if known is not None and self._last_confirm is not None and self._last_confirm["turn"] is known:
+                    self._last_confirm["hl"] = len(self.pipeline.history)
+                turn_id = self.pipeline.guard.current + 1
+            await self.send({"type": "transcript", "utt_id": utt_id, "turn_id": turn_id,
                              "text": text, "stt": stt_id, "stt_ms": round(stt_ms, 1),
                              "emotion": emotion, "event": event, "tone": tone})
-            self._stage = "respond"
-            opener = None
-            bank = self.engines.backchannel
-            if self.backchannel_enabled and bank is not None:
-                picked = bank.pick(getattr(self.engines.tts, "voice", None))
-                opener = picked[1] if picked else None
-            res = await self.pipeline.respond(text, trace=trace, opener=opener)
+            if spec is not None:   # transcript → assistant_delta → (commit) audio_begin 순서
+                await self._release_spec_ui(spec)
+                self._stage = "respond"
+                if spec.pt.state == "aborted":   # 그 사이 끊겼다
+                    res = None
+                else:
+                    log.debug("선행 결과 commit turn=%s", turn_id)
+                    res = await spec.pt.commit()
+                if res is None:
+                    await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": turn_id, "interrupted": True,
+                                     "spoken_text": "", "trace": {"stt_ms": round(stt_ms, 1), **self._trace_ms(trace)}})
+                    return
+            else:
+                self._stage = "respond"
+                res = await self.pipeline.respond(text, trace=trace, opener=self._pick_opener())
             await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": res.trace.turn_id,
                              "interrupted": res.interrupted, "spoken_text": res.spoken_text,
                              "trace": {"stt_ms": round(stt_ms, 1), **self._trace_ms(res.trace)}})
@@ -378,6 +478,10 @@ class DemoSession:
             await self.send({"type": "error", "message": f"{type(e).__name__}: {e}"})
         finally:
             self._stage = None
+            if spec is not None:
+                if self._spec is spec:
+                    self._spec = None
+                await spec.pt.abort()   # commit하지 못한 채 끝났으면 버린다 (이미 commit됐으면 아무 일 없음)
 
     async def close(self) -> None:
         """WS가 닫혔다. 진행 중 작업을 정리한다."""

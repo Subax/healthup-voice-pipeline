@@ -19,6 +19,8 @@ FIRST_CHUNK = "first_chunk"      # t4
 BACKCHANNEL = "backchannel"      # 미리 합성한 맞장구의 첫 프레임을 낸 시각
 TTS_FIRST_AUDIO = "tts_first_audio"  # t5
 PLAYBACK_START = "playback_start"  # t6 (Unreal 회신 또는 로컬 싱크)
+SPEC_START = "spec_start"        # 선행 생성 시작 (분석용)
+SPEC_COMMIT = "spec_commit"      # 선행 결과를 commit한 시각 (분석용)
 
 
 @dataclass
