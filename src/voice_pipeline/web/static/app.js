@@ -8,6 +8,9 @@ let workletLoaded = false;
 let micStream = null, micNode = null, running = false;
 let cur = null;             // 현재 재생 중인 턴
 const deadTurns = new Set();
+let wantRun = false;        // 「시작」을 눌러 실행 중 (끊기면 재연결한다)
+let retries = 0, retryTimer = null;
+const TOKEN = new URLSearchParams(location.search).get("t");  // 인증 토큰 (?t=)
 let speakingLocal = false, lastState = "listening";
 const turnEls = {};         // turn_id -> 말풍선
 const latRows = {};
@@ -183,6 +186,7 @@ function onMessage(ev) {
   const m = JSON.parse(ev.data);
   switch (m.type) {
     case "hello": onHello(m); break;
+    case "pong": if (typeof m.t === "number") $("rtt").textContent = `RTT ${Math.round(performance.now() - m.t)} ms`; break;
     case "stt_ready": $("stt").value = m.stt; $("err").textContent = ""; break;
     case "retranscript": addMsg("alt", `다시 인식 [${m.stt} ${fmt(m.stt_ms)}ms] ${m.text || "(빈 결과)"}`); break;
     case "turn_eval": onTurnEval(m); break;
@@ -208,6 +212,35 @@ function onMessage(ev) {
 }
 
 // ---------- 시작 ----------
+function wsUrl() {
+  return (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws" +
+    (TOKEN ? "?t=" + encodeURIComponent(TOKEN) : "");
+}
+// ws를 연다. 열리면 config를 보낸다. 끊기면(wantRun일 때) 지수 백오프로 다시 연다
+function connect() {
+  const mine = ws = new WebSocket(wsUrl());
+  ws.binaryType = "arraybuffer";
+  ws.onmessage = onMessage;
+  ws.onopen = () => {
+    if (ws !== mine) return;
+    retries = 0; setRunning(true);
+    send({ type: "config", barge_in: $("bargein").checked, backchannel: $("backchannel").checked });
+    lastState = "listening"; epBadge = null; setBadge();
+  };
+  ws.onclose = () => {
+    if (ws !== mine) return;
+    resetPlayback();  // 서버 세션이 새로 생기므로 재생 중이던 턴은 버린다
+    if (!wantRun) { setRunning(false); $("badge").textContent = "연결 끊김"; $("badge").className = "badge"; return; }
+    $("badge").textContent = "재연결 중"; $("badge").className = "badge";
+    $("rtt").textContent = "RTT - ms";
+    const delay = Math.min(5000, 500 * 2 ** retries++);
+    retryTimer = setTimeout(() => { retryTimer = null; if (wantRun) connect(); }, delay);
+  };
+}
+function resetPlayback() {
+  if (cur && !cur.dead) { killTurn(cur, 0, false); }
+  cur = null; deadTurns.clear(); speakingLocal = false;
+}
 async function start() {
   $("start").disabled = true;
   if (!ctx || ctx.state === "closed") {
@@ -215,16 +248,9 @@ async function start() {
     master = ctx.createGain(); master.connect(ctx.destination);
   }
   await ctx.resume();
-  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
-  ws.binaryType = "arraybuffer";
-  ws.onmessage = onMessage;
-  const mine = ws;
-  ws.onclose = () => { if (ws !== mine) return; running = false; $("badge").textContent = "연결 끊김"; $("badge").className = "badge";
-    setRunning(false); };
-  await new Promise((res) => { ws.onopen = res; });
+  wantRun = true; retries = 0;
+  connect();
   setRunning(true);
-  send({ type: "config", barge_in: $("bargein").checked, backchannel: $("backchannel").checked });
-  lastState = "listening"; setBadge();
   try {
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
@@ -237,12 +263,14 @@ async function start() {
       let s = 0; for (let i = 0; i < pcm.length; i++) s += pcm[i] * pcm[i];
       const db = 20 * Math.log10(Math.sqrt(s / pcm.length) / 32768 + 1e-6);
       $("level").style.width = Math.max(0, Math.min(100, (db + 60) / 60 * 100)) + "%";
-      if (ws.readyState === 1 && ws.bufferedAmount < 64000) ws.send(e.data);
+      if (ws && ws.readyState === 1 && ws.bufferedAmount < 64000) ws.send(e.data);
     };
   } catch (e) {
     $("err").textContent = "마이크를 쓸 수 없습니다(" + e.message + "). 텍스트 입력으로 시험하세요. localhost 또는 HTTPS 주소여야 합니다.";
   }
 }
+// RTT: 2초마다 ping을 보내고 pong이 오면 표시한다
+setInterval(() => send({ type: "ping", t: performance.now() }), 2000);
 
 function setRunning(on) {
   running = on;
@@ -252,6 +280,7 @@ function setRunning(on) {
   $("stopAnswer").disabled = !on;
 }
 function stopAll() {
+  wantRun = false; clearTimeout(retryTimer); retryTimer = null;
   send({ type: "stop" });
   if (cur && !cur.dead) { killTurn(cur, 40, false); speakingLocal = false; }
   if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
@@ -261,7 +290,7 @@ function stopAll() {
   if (old) old.onmessage = null; // 중지 뒤 늦게 오는 avatar_state가 「중지됨」을 덮지 않게 한다
   setTimeout(() => { try { old.close(); } catch (e) {} }, 200); // stop 메시지가 나간 뒤 닫는다
   lastState = "listening"; epBadge = null; ep = null; setRunning(false);
-  $("badge").textContent = "중지됨"; $("badge").className = "badge";
+  $("badge").textContent = "중지됨"; $("badge").className = "badge"; $("rtt").textContent = "RTT - ms";
 }
 $("start").onclick = () => (running ? stopAll() : start());
 $("stopAnswer").onclick = () => send({ type: "stop" });

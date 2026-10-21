@@ -5,7 +5,9 @@ cd "$(dirname "$0")/.."
 PORT=8080
 prev=""
 for a in "$@"; do [ "$prev" = "--port" ] && PORT="$a"; prev="$a"; done
-echo "열기:  http://localhost:${PORT}/"
-echo "원격 장비라면 내 PC에서:  ssh -L ${PORT}:localhost:${PORT} <host>"
-echo "(getUserMedia는 보안 컨텍스트가 필요하다. http://localhost는 되고 LAN IP는 안 된다)"
-exec .venv/bin/python -m voice_pipeline.web --host 127.0.0.1 --port "$PORT" "$@"
+# --host 기본값은 127.0.0.1. 루프백이 아니면 --tls-cert --tls-key --auth-token이 필요하다
+echo "열기:  http://localhost:${PORT}/  (TLS를 켰다면 https)"
+echo "태블릿(LAN): scripts/gen_cert.sh <서버IP> → run_demo.sh --host 0.0.0.0 --tls-cert certs/server.pem --tls-key certs/server.key --auth-token <토큰>"
+echo "            태블릿 주소: https://<서버IP>:${PORT}/?t=<토큰>"
+echo "(getUserMedia는 보안 컨텍스트가 필요하다. http://localhost와 HTTPS는 되고 http://LAN IP는 안 된다)"
+exec .venv/bin/python -m voice_pipeline.web --port "$PORT" "$@"

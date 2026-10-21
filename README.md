@@ -65,6 +65,13 @@ tests/
 9. 브라우저에서 `http://localhost:8080/`을 열고 「시작」을 누른다
 
 - 다른 PC에서 접속하면 그 PC에서 `ssh -L 8080:localhost:8080 <장비>`를 먼저 실행한다. 마이크(getUserMedia)는 localhost나 HTTPS에서만 동작한다.
+- 같은 LAN의 태블릿에서 접속하려면 HTTPS와 토큰이 필요하다 (둘 중 하나라도 없으면 서버가 시작하지 않는다):
+  1. 인증서를 만든다: `scripts/gen_cert.sh <서버IP> [호스트이름]` (`certs/ca.pem`, `certs/server.pem`, `certs/server.key`)
+  2. 태블릿에 `certs/ca.pem`을 설치한다 (Android: 설정 → 보안 → 인증서 설치, iOS: 프로파일 설치 후 신뢰 켜기)
+  3. 서버를 띄운다: `scripts/run_demo.sh --host 0.0.0.0 --tls-cert certs/server.pem --tls-key certs/server.key --auth-token <토큰>`
+  4. 태블릿 브라우저에서 `https://<서버IP>:8080/?t=<토큰>`을 열고 「시작」을 누른다
+  5. 화면 상단의 「RTT n ms」로 서버까지 왕복 시간을 본다. 서버 쪽 점검은 `bench/net_probe.py --url wss://<서버IP>:8080/ws --token <토큰> --cacert certs/ca.pem`
+- 토큰은 환경변수 `DEMO_AUTH_TOKEN`으로도 준다. 연결이 끊기면 화면이 「재연결 중」으로 바뀌고 자동으로 다시 연결한다.
 - 스피커 소리가 마이크로 들어가 barge-in이 잘못 걸리면 헤드폰을 쓴다. 또는 화면의 barge-in 선택을 끈다.
 - 화면의 「목소리」에서 말투를 고른다: 자동(기본), 차분하게, 위로하는, 따뜻하게, 차분하고 단단하게, 밝게 (기존). 모두 같은 여성 화자(CosyVoice 공식 예제 음성)이고 지시문만 다르다. 「자동」은 사용자 발화의 감정 태그(SenseVoice)와 음량·말 속도로 톤을 고른다 (`src/voice_pipeline/tone.py`, 임계값은 미튜닝 추측값). 고른 톤은 말풍선에 `[톤 …]`으로 나온다.
 - 화면의 「맞장구」를 켜면 답 앞에 미리 합성한 "네." 등이 바로 나온다. 끄려면 선택을 풀거나 `--no-backchannel`을 쓴다.
