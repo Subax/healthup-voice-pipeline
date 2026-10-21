@@ -43,6 +43,9 @@ class Engines:
     endpoint_default: str = "smart"  # 세션 기본 턴 종료 방식: smart | fixed
     endpoint_log_dir: Path | None = None  # 턴 종료 판단 JSONL 위치. None이면 bench/results/endpoint_log
     endpoint_scorer: Any = None      # EndpointScorer (Smart Turn). None이면 p=None 경로
+    speculate: bool = True           # 선행 생성: 턴 확정 대기 중 LLM·TTS를 먼저 돌린다
+    barge_filter: bool = True        # 말하는 중 짧은 맞장구("네")로 답을 끊지 않는다
+    emotion_hint: bool = True        # 감정 태그를 LLM 어조 지시(hint)로 쓴다
     _stt_cache: dict[str, Any] = field(default_factory=dict)
     _stt_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
 
@@ -127,7 +130,8 @@ def _mock_reply(messages: list[dict]) -> str:
 
 def build_engines(llm: str = "mock", tts: str = "mock", stt: str = "mock", *,
                   first_min: int = 2, vad_silence_ms: int = 500, backchannel: bool = True,
-                  endpoint: str = "smart") -> Engines:
+                  endpoint: str = "smart", speculate: bool = True, barge_filter: bool = True,
+                  emotion_hint: bool = True) -> Engines:
     labels = {"llm": llm, "tts": tts, "stt": stt}
     if llm == "vllm":
         from ..llm.openai_stream import OpenAIStreamLLM
@@ -150,7 +154,8 @@ def build_engines(llm: str = "mock", tts: str = "mock", stt: str = "mock", *,
         from ..stt import VADSegmenter
         make_vad = lambda min_silence_ms=None: VADSegmenter(min_silence_ms=min_silence_ms or vad_silence_ms)
     eng = Engines(llm_o, tts_o, stt_o, make_vad, labels, first_min, vad_silence_ms,
-                  BackchannelBank() if backchannel else None, endpoint_default=endpoint)
+                  BackchannelBank() if backchannel else None, endpoint_default=endpoint,
+                  speculate=speculate, barge_filter=barge_filter, emotion_hint=emotion_hint)
     if stt == "mock":
         from ..endpoint.smart_turn import MockEndpointScorer
         eng.endpoint_scorer = MockEndpointScorer(0.8)

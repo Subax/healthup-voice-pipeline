@@ -75,6 +75,8 @@ tests/
 - 스피커 소리가 마이크로 들어가 barge-in이 잘못 걸리면 헤드폰을 쓴다. 또는 화면의 barge-in 선택을 끈다.
 - 화면의 「목소리」에서 말투를 고른다: 자동(기본), 차분하게, 위로하는, 따뜻하게, 차분하고 단단하게, 밝게 (기존). 모두 같은 여성 화자(CosyVoice 공식 예제 음성)이고 지시문만 다르다. 「자동」은 사용자 발화의 감정 태그(SenseVoice)와 음량·말 속도로 톤을 고른다 (`src/voice_pipeline/tone.py`, 임계값은 미튜닝 추측값). 고른 톤은 말풍선에 `[톤 …]`으로 나온다.
 - 화면의 「맞장구」를 켜면 답 앞에 미리 합성한 "네." 등이 바로 나온다. 끄려면 선택을 풀거나 `--no-backchannel`을 쓴다.
+- 비교·문제 확인용 끄개: `--no-speculate`(선행 생성: 턴 확정 대기 중 LLM·TTS를 먼저 돌림), `--no-barge-filter`(말하는 중 짧은 "네"로 답을 끊지 않는 판별), `--no-emotion-hint`(감정 태그를 LLM 어조 지시로 쓰기).
+- TTS 서버의 첫 오디오 묶음 크기는 `CV_HOP`(기본 10)이다. 값별 비교는 `bench/hop_sweep.sh 25 10`.
 - 설정: `scripts/run_demo.sh --first-min 2 --vad-silence-ms 500`. `--first-min`은 첫 청크 최소 글자 수, `--vad-silence-ms`는 발화 끝 판정 무음 길이다.
 - 브라우저 탭은 하나만 연다. TTS 엔진을 탭끼리 공유하므로 두 탭이 동시에 말하면 충돌한다.
 - GPU 없이 화면만 시험하려면: `scripts/run_demo.sh --llm mock --tts mock --stt mock`

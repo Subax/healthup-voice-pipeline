@@ -3,13 +3,14 @@
 브라우저 쪽 JS(마이크 worklet, 재생, playback 회신)까지 실제로 돈다.
 준비: 별도 venv에 `pip install playwright && playwright install chromium`
 실행: <venv>/bin/python bench/web_e2e.py <16kHz 모노 wav> [기대 턴 수]
+playwright가 기대하는 chromium 버전이 캐시와 다르면 CHROME_PATH=<chrome-headless-shell 경로>를 준다.
 데모 서버(scripts/run_demo.sh)가 먼저 떠 있어야 한다. 결과는 화면의 대화·지연 표다.
 """
-import asyncio, sys
+import asyncio, os, sys
 from playwright.async_api import async_playwright
 async def main(wav):
     async with async_playwright() as p:
-        b = await p.chromium.launch(args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
+        b = await p.chromium.launch(executable_path=os.environ.get("CHROME_PATH") or None, args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
                                           f"--use-file-for-fake-audio-capture={wav}%noloop", "--autoplay-policy=no-user-gesture-required"])
         pg = await b.new_page()
         pg.on("console", lambda m: print("console:", m.type, m.text))

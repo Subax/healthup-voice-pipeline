@@ -36,6 +36,9 @@ def main() -> None:
     ap.add_argument("--endpoint", choices=["smart", "fixed"], default="smart",
                     help="턴 종료 방식: smart(어미+운율) | fixed(고정 무음 --vad-silence-ms)")
     ap.add_argument("--no-backchannel", action="store_true", help="미리 합성한 맞장구(네, 음)를 끈다")
+    ap.add_argument("--no-speculate", action="store_true", help="선행 생성(확정 대기 중 LLM·TTS 먼저)을 끈다")
+    ap.add_argument("--no-barge-filter", action="store_true", help="말하는 중 맞장구 판별을 끄고 어떤 소리든 끊는다")
+    ap.add_argument("--no-emotion-hint", action="store_true", help="감정 태그를 LLM 어조 지시로 쓰지 않는다")
     ap.add_argument("--tls-cert", help="TLS 인증서(PEM). --tls-key와 함께 쓴다")
     ap.add_argument("--tls-key", help="TLS 개인키(PEM)")
     ap.add_argument("--auth-token", default=os.environ.get("DEMO_AUTH_TOKEN"),
@@ -53,10 +56,12 @@ def main() -> None:
         ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ssl_ctx.load_cert_chain(a.tls_cert, a.tls_key)
     app = create_app(build_engines(a.llm, a.tts, a.stt, first_min=a.first_min, vad_silence_ms=a.vad_silence_ms,
-                                 backchannel=not a.no_backchannel, endpoint=a.endpoint),
+                                 backchannel=not a.no_backchannel, endpoint=a.endpoint,
+                                 speculate=not a.no_speculate, barge_filter=not a.no_barge_filter,
+                                 emotion_hint=not a.no_emotion_hint),
                      auth_token=a.auth_token)
     scheme = "https" if tls else "http"
-    print(f"{scheme}://{a.host}:{a.port}/  (auth={'on' if a.auth_token else 'off'} llm={a.llm} tts={a.tts} stt={a.stt} first_min={a.first_min} vad_silence_ms={a.vad_silence_ms} backchannel={not a.no_backchannel} endpoint={a.endpoint})")
+    print(f"{scheme}://{a.host}:{a.port}/  (auth={'on' if a.auth_token else 'off'} llm={a.llm} tts={a.tts} stt={a.stt} first_min={a.first_min} vad_silence_ms={a.vad_silence_ms} backchannel={not a.no_backchannel} endpoint={a.endpoint} speculate={not a.no_speculate} barge_filter={not a.no_barge_filter} emotion_hint={not a.no_emotion_hint})")
     web.run_app(app, host=a.host, port=a.port, ssl_context=ssl_ctx, print=None, access_log=None)  # 접속 로그를 끈다: 쿼리의 토큰이 남지 않게
 
 
