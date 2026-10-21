@@ -178,15 +178,16 @@ class VoicePipeline:
     # ---------- 공개 API ----------
 
     async def respond(self, user_text: str, trace: TurnTrace | None = None,
-                      opener: bytes | None = None) -> TurnResult:
+                      opener: bytes | None = None, hint: str | None = None) -> TurnResult:
         """사용자 발화 하나에 응답한다. trace에 speech_end 등을 미리 찍어 넘길 수 있다.
 
         opener는 미리 합성한 맞장구 PCM16 (TTS 샘플레이트). 있으면 LLM 답보다 먼저 재생한다.
+        hint는 이번 턴의 어조 지시. LLM 요청에만 들어가고 화면·로그에는 나가지 않는다.
         """
         await self._abort_pending()
         turn_id = self.guard.next_turn()
         trace = self._bind_trace(turn_id, trace)
-        self.history.append({"role": "user", "content": user_text})
+        self.history.append(self._user_message(user_text, hint))
         result = TurnResult(trace=trace)
         out = _Outbox(self.guard, released=True)
         await out.call(turn_id, partial(self.sink.avatar_state, "thinking"))
@@ -195,7 +196,7 @@ class VoicePipeline:
         return result
 
     async def prepare(self, user_text: str, trace: TurnTrace | None = None,
-                      opener: bytes | None = None) -> PendingTurn:
+                      opener: bytes | None = None, hint: str | None = None) -> PendingTurn:
         """선행 생성: LLM·청커·TTS를 지금 시작하고, 싱크로 가는 호출은 모두 대기열에 쌓는다.
 
         commit() 전에는 오디오·audio_begin/end·avatar_state·interrupt를 싱크로 보내지 않는다.
@@ -207,7 +208,7 @@ class VoicePipeline:
         trace = self._bind_trace(turn_id, trace)
         trace.mark(SPEC_START)
         hist_len = len(self.history)
-        self.history.append({"role": "user", "content": user_text})
+        self.history.append(self._user_message(user_text, hint))
         result = TurnResult(trace=trace)
         out = _Outbox(self.guard, released=False)
         await out.call(turn_id, partial(self.sink.avatar_state, "thinking"))
@@ -215,6 +216,13 @@ class VoicePipeline:
         pt._task = asyncio.create_task(self._run_turn(turn_id, result, from_llm=True, opener=opener, out=out))
         self._pending = pt
         return pt
+
+    @staticmethod
+    def _user_message(text: str, hint: str | None) -> dict:
+        msg = {"role": "user", "content": text}
+        if hint:
+            msg["hint"] = hint
+        return msg
 
     @property
     def pending(self) -> PendingTurn | None:

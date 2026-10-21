@@ -166,7 +166,7 @@ async def test_hello_and_voice_config():
         ws = await c.ws_connect("/ws")
         hello = await recv(ws)
         assert hello["first_min"] == 5 and hello["vad_silence_ms"] == 400
-        assert [v["id"] for v in hello["voices"]] == ["auto", "calm", "warm"] and hello["voice"] == "auto"
+        assert [v["id"] for v in hello["voices"]] == ["auto", "calm", "warm"] and hello["voice"] == "calm"  # 자동은 선택해야 켜진다
         await ws.send_str(json.dumps({"type": "config", "voice": "warm"}))
         await ws.send_str(json.dumps({"type": "config", "voice": "nope"}))
         await ws.send_str(json.dumps({"type": "reset"}))
@@ -332,8 +332,9 @@ async def test_auto_voice_picks_tone_from_emotion():
     try:
         ws = await c.ws_connect("/ws")
         hello = await recv(ws)
-        assert hello["voice"] == "auto" and hello["voices"][0]["id"] == "auto"
+        assert hello["voice"] != "auto" and hello["voices"][0]["id"] == "auto"
         assert "auto" not in [v["id"] for v in tts.voices]  # 서버 목록에는 auto 가 없다
+        await ws.send_str(json.dumps({"type": "config", "voice": "auto"}))   # 자동 톤은 선택했을 때만 켜진다
         tr = await _mic_turn(ws)
         assert tr["emotion"] == "SAD" and tr["tone"] == "comfort"
         assert tts.used and set(tts.used) == {"comfort"}

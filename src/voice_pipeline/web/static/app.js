@@ -2,6 +2,7 @@
 const $ = (id) => document.getElementById(id);
 const JITTER = 0.06;        // 초기 지터 버퍼 (초)
 const PROGRESS_MS = 100;    // 재생 위치 보고 주기
+const DUCK_GAIN = 0.25;     // 사용자가 말하기 시작하면 낮추는 음량 (덕킹)
 
 let ws = null, ctx = null, master = null;
 let workletLoaded = false;
@@ -93,6 +94,7 @@ function playedMs(t) {
 function stopTimers(t) { clearInterval(t.prog); clearTimeout(t.startTimer); clearTimeout(t.finTimer); }
 
 function onBegin(m) {
+  if (master) master.gain.setTargetAtTime(1, ctx.currentTime, 0.01);   // 덕킹 해제
   if (cur && !cur.dead) killTurn(cur, 0, false);
   const gain = ctx.createGain(); gain.connect(master);
   cur = { id: m.turn_id, rate: m.sample_rate, gain, cursor: 0, chunks: [], ptr: 0, doneMs: 0, totalMs: 0,
@@ -186,6 +188,8 @@ function onMessage(ev) {
   const m = JSON.parse(ev.data);
   switch (m.type) {
     case "hello": onHello(m); break;
+    case "duck": if (ctx && master) master.gain.setTargetAtTime(m.on ? DUCK_GAIN : 1, ctx.currentTime, 0.03); break;
+    case "backchannel_ignored": addMsg("alt", `맞장구로 보고 무시: ${m.text || "(소리)"}`); break;
     case "pong": if (typeof m.t === "number") $("rtt").textContent = `RTT ${Math.round(performance.now() - m.t)} ms`; break;
     case "stt_ready": $("stt").value = m.stt; $("err").textContent = ""; break;
     case "retranscript": addMsg("alt", `다시 인식 [${m.stt} ${fmt(m.stt_ms)}ms] ${m.text || "(빈 결과)"}`); break;

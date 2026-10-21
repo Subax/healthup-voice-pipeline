@@ -26,11 +26,13 @@ from aiohttp import web
 
 from ..bridge.ws_server_sink import WebSocketServerSink
 from ..llm.events import LLMClient, LLMEvent, Token
+from ..barge_filter import PROBE_WINDOW_MS, is_backchannel
 from ..chunker import SemanticChunker
 from ..pipeline import PendingTurn, VoicePipeline
 from ..trace import (BACKCHANNEL, FIRST_CHUNK, LLM_FIRST_TOKEN, PLAYBACK_START, SPEECH_END, STT_FINAL,
                      TTS_FIRST_AUDIO, TURN_CONFIRMED, TurnTrace)
 from ..endpoint.turn import ConfirmedTurn, TurnEndpointer
+from ..llm.hint import emotion_hint
 from ..tone import AUTO, CALM, extract_features, pick_tone
 from .engines import Engines
 
@@ -40,6 +42,7 @@ AUTO_LABEL = "자동 (사용자 말투에 맞춤)"
 
 PAUSE_SILENCE_MS = 200   # smart 모드 VAD 최소 무음 (짧은 멈춤까지 알린다)
 RESUME_MERGE_MS = 1500   # 확정 직후 이 시간 안에 다시 말하면(본 응답 소리 전) 같은 턴으로 이어 붙인다
+PRE_ROLL_MS = 300        # VAD 구간 앞에 붙는 pre-roll. 말한 길이 = 구간 길이 - 이 값
 ENDPOINT_OPTIONS = [{"id": "smart", "label": "어미+운율 (Smart Turn·Kiwi)"},
                     {"id": "fixed", "label": "고정 무음 500ms"}]
 
@@ -96,6 +99,8 @@ class DemoSession:
             on_speculate=self._on_speculate if self.speculate else None,
             on_speculate_cancel=self._on_speculate_cancel if self.speculate else None)
         self.barge_in_enabled = True
+        self.barge_filter = bool(getattr(engines, "barge_filter", True))  # 말하는 중 짧은 맞장구는 끼어들기로 보지 않는다
+        self._probe: dict | None = None     # 맞장구 판별 중: {"timer": Task}
         self.backchannel_enabled = engines.backchannel is not None
         self._task: asyncio.Task | None = None
         self._stage: str | None = None      # "stt" | "respond" | None
@@ -106,7 +111,8 @@ class DemoSession:
         self.stt_id = engines.stt_id        # STT 선택은 세션마다
         self._stt_switch: asyncio.Task | None = None
         self._last_pcm: bytes | None = None  # 마지막 마이크 발화 (다시 인식용)
-        self.voice_auto = True              # 목소리 선택이 auto 인가 (TTS 목록이 있어야 실제로 켜진다)
+        self.voice_auto = False             # 목소리 선택이 auto 인가. 기본은 끔: 감정 맞춤은 LLM 어조 지시(hint)로 한다
+        self.emotion_hint = bool(getattr(engines, "emotion_hint", True))
 
     def _next_utt(self) -> int:
         self._utt_seq += 1
@@ -137,8 +143,10 @@ class DemoSession:
         tts = self.engines.tts
         voices = list(getattr(tts, "voices", None) or [])  # 목소리 목록은 TTS 어댑터가 warmup 뒤에 채운다
         voice = getattr(tts, "voice", None)
-        if self._auto_active():  # auto 는 세션이 UI 용으로만 붙인다 (서버 목록에는 없다)
-            voices, voice = [{"id": AUTO, "label": AUTO_LABEL}, *voices], AUTO
+        if voices:  # auto 는 세션이 UI 용으로만 붙인다 (서버 목록에는 없다). 기본 선택은 서버 목소리다
+            voices = [{"id": AUTO, "label": AUTO_LABEL}, *voices]
+            if self.voice_auto:
+                voice = AUTO
         await self.send({"type": "hello", "engines": self.engines.labels, "barge_in": self.barge_in_enabled,
                          "backchannel": self.backchannel_enabled,
                          "first_min": self.engines.first_min, "vad_silence_ms": self.engines.vad_silence_ms,
@@ -191,10 +199,12 @@ class DemoSession:
             kind = type(ev).__name__
             if kind == "SpeechStart":
                 await self.send({"type": "vad", "speaking": True})
-                # 최소 구현. TODO: 맞장구(네, 음) 필터는 범위 밖이다. 지금은 어떤 발화든 끊는다.
                 if self.endpoint_mode == "smart":
                     await self._maybe_reopen()
                 if self._busy():
+                    if self.barge_filter and self.barge_in_enabled:
+                        await self._probe_begin()   # 소리를 낮추고 맞장구인지 본다. 아직 끊지 않는다
+                        continue
                     await self._stop_current()
                 if self.endpoint_mode == "smart":
                     await self.endpointer.on_speech_start()
@@ -205,6 +215,12 @@ class DemoSession:
             elif kind == "SpeechEnd":
                 await self.send({"type": "vad", "speaking": False})
                 now = time.monotonic()
+                if self._probe is not None:
+                    if self._busy():
+                        self._probe_end(ev.pcm16, now)   # STT로 맞장구인지 가른다 (백그라운드)
+                        continue
+                    self._clear_probe()   # 답이 이미 끝났다: 이 발화는 맞장구가 아니라 새 턴이다
+                    await self._duck(False)
                 if self.endpoint_mode == "smart":  # 판단·확정은 TurnEndpointer가 한다
                     await self.endpointer.on_pause(ev.pcm16, now - PAUSE_SILENCE_MS / 1000)
                     continue
@@ -232,6 +248,10 @@ class DemoSession:
         elif kind == "config":
             if "barge_in" in msg:
                 self.barge_in_enabled = bool(msg["barge_in"])
+            if "barge_filter" in msg:
+                self.barge_filter = bool(msg["barge_filter"])
+                if not self.barge_filter:
+                    self._clear_probe()
             if "backchannel" in msg:
                 self.backchannel_enabled = bool(msg["backchannel"]) and self.engines.backchannel is not None
             voice = msg.get("voice")
@@ -307,6 +327,9 @@ class DemoSession:
 
     # ---------- 선행 생성 ----------
 
+    def _hint(self, emotion: str | None) -> str | None:
+        return emotion_hint(emotion) if self.emotion_hint else None
+
     def _pick_opener(self) -> bytes | None:
         bank = self.engines.backchannel
         if self.backchannel_enabled and bank is not None:
@@ -327,7 +350,7 @@ class DemoSession:
         emotion, event = getattr(last, "emotion", None), getattr(last, "event", None)
         tone = self._apply_tone(emotion, pcm16, text) if self._auto_active() else None
         trace = TurnTrace(0)
-        pt = await self.pipeline.prepare(text, trace=trace, opener=self._pick_opener())
+        pt = await self.pipeline.prepare(text, trace=trace, opener=self._pick_opener(), hint=self._hint(emotion))
         self._spec = _Spec(pt, text, trace, tone, emotion, event)  # prepare 직후, 첫 토큰보다 먼저 보관한다
         log.debug("선행 생성 시작 utt=%s turn=%s text=%r", utt_id, pt.turn_id, text)
 
@@ -352,10 +375,77 @@ class DemoSession:
             await self.send({"type": "assistant_delta", "turn_id": tid, "text": text})
         sp.held = False
 
+    # ---------- barge-in 맞장구 필터 (dev-guide §6.2) ----------
+
+    async def _duck(self, on: bool) -> None:
+        await self.send({"type": "duck", "on": on})
+
+    async def _probe_begin(self) -> None:
+        """말하는 중에 사용자 소리가 시작됐다. 소리를 낮추고, 짧은 맞장구인지 끝까지 본다.
+
+        PROBE_WINDOW_MS 안에 발화가 안 끝나면 끼어들기로 보고 끊는다.
+        """
+        if self._probe is not None:
+            return
+        self._probe = {"timer": asyncio.get_running_loop().create_task(self._probe_timeout())}
+        await self._duck(True)
+
+    def _clear_probe(self) -> None:
+        pr, self._probe = self._probe, None
+        if pr is not None:
+            t = pr.get("timer")
+            if t is not None and not t.done() and t is not asyncio.current_task():
+                t.cancel()
+
+    async def _probe_timeout(self) -> None:
+        await asyncio.sleep(PROBE_WINDOW_MS / 1000)
+        if self._probe is None or self._closed:
+            return
+        self._probe = None       # 길게 이어진다: 맞장구가 아니다. 이후 SpeechEnd는 보통 턴으로 처리된다
+        await self._stop_current()
+        await self._duck(False)
+        if self.endpoint_mode == "smart":
+            await self.endpointer.on_speech_start()
+
+    def _probe_end(self, pcm: bytes, now: float) -> None:
+        """짧게 끝난 발화: 전사해서 맞장구면 무시하고, 아니면 끼어들기로 처리한다."""
+        pr = self._probe
+        if pr is not None and pr.get("timer") is not None and pr["timer"] is not asyncio.current_task():
+            pr["timer"].cancel()
+        self._probe = None
+        self._spawn(self._probe_classify(pcm, now))
+
+    async def _probe_classify(self, pcm: bytes, now: float) -> None:
+        dur_ms = max(0.0, len(pcm) / 32.0 - PRE_ROLL_MS)
+        text = None
+        try:
+            r = await self._stt().transcribe(pcm)
+            text = (r.text or "").strip()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("맞장구 판별 STT 오류: 끼어들기로 본다")
+        if text is not None and is_backchannel(text, dur_ms):
+            log.debug("맞장구 무시: %r %.0fms", text, dur_ms)
+            await self._duck(False)
+            await self.send({"type": "backchannel_ignored", "text": text})
+            return
+        await self._stop_current()
+        await self._duck(False)
+        if self.endpoint_mode == "smart":
+            await self.endpointer.on_speech_start()
+            await self.endpointer.on_pause(pcm, now - PAUSE_SILENCE_MS / 1000)
+        else:
+            trace = TurnTrace(0)
+            trace.mark(SPEECH_END, now - self.engines.vad_silence_ms / 1000)
+            trace.mark(TURN_CONFIRMED, now)
+            await self._start_turn(trace, pcm16=pcm)
+
     # ---------- 턴 중단 ----------
 
     async def _stop_current(self, keep_spec: _Spec | None = None) -> None:
         """진행 중 STT/응답/재생을 멈춘다. 보관 중인 선행 턴도 버린다 (keep_spec 제외)."""
+        self._clear_probe()
         if self._spec is not None and self._spec is not keep_spec:
             await self._abort_spec()
         t = self._task
@@ -467,7 +557,7 @@ class DemoSession:
                     return
             else:
                 self._stage = "respond"
-                res = await self.pipeline.respond(text, trace=trace, opener=self._pick_opener())
+                res = await self.pipeline.respond(text, trace=trace, opener=self._pick_opener(), hint=self._hint(emotion))
             await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": res.trace.turn_id,
                              "interrupted": res.interrupted, "spoken_text": res.spoken_text,
                              "trace": {"stt_ms": round(stt_ms, 1), **self._trace_ms(res.trace)}})
