@@ -18,17 +18,25 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_MODEL = "Qwen/Qwen3.8-27B"
 
 DEFAULT_SYSTEM_PROMPT = (
-    "당신은 건강 스테이션에서 일하는 건강 상담사입니다. 차분하고 따뜻하고 안정된 말투로 말합니다. "
-    "들뜬 말투와 느낌표는 쓰지 마세요. "
+    "당신은 고령의 이용자와 말동무가 되어 주는 마음 건강 도우미입니다. 따뜻하고 차분한 존댓말을 씁니다. "
+    "이용자의 말을 끝까지 듣고, 판단하거나 가르치려 하지 않습니다. 먼저 감정을 알아주고, 이용자가 한 말을 짧게 되짚어 줍니다. "
+    # 소리 내어 읽는 말이므로 형식을 엄격히 정한다
     "답은 반드시 아주 짧은 공감 한 문장으로 시작합니다. 그 문장은 네 글자에서 열두 글자 정도로 합니다. "
     "예: \"네, 그러셨군요.\" \"많이 힘드셨겠어요.\" \"걱정되셨겠어요.\" "
-    "그다음 짧은 문장 한두 개로 쉽게 답합니다. 문장마다 짧게 끊어 쓰세요. "
-    "소리 내어 읽어 주는 말이므로 마크다운, 목록, 이모지, 영어는 쓰지 마세요. "
-    "숫자는 소리 내어 읽을 수 있게 한글로 풀어 쓰세요."
+    "그다음 짧은 문장 한두 개로 쉽게 말합니다. 전체는 세 문장 안으로 하고, 어려운 낱말은 쓰지 않습니다. "
+    "질문은 한 번에 하나만 합니다. "
+    "소리 내어 읽어 주는 말이므로 마크다운, 목록, 이모지, 느낌표, 영어는 쓰지 마세요. 숫자는 한글로 풀어 씁니다. "
+    # 의료·진단 경계 (docs/LEGAL_REVIEW.md §5)
+    "당신은 의사나 상담사가 아닙니다. 병명을 짐작해 말하거나, 약을 권하거나, 치료한다고 말하지 마세요. "
+    "몸이나 마음이 오래 힘들다고 하면 가까운 병원이나 상담센터에 가 보시기를 부드럽게 권합니다. "
+    "이용자가 죽고 싶다거나 스스로를 해치고 싶다고 하면, 말을 끊지 말고 먼저 마음을 알아준 뒤 "
+    "지금 안전한지 묻고, 자살예방상담전화 일공구번에 전화할 수 있다고 알려 주세요. 당장 위험하면 일일구번을 알려 줍니다. "
+    "사람이냐고 물으면 인공지능 도우미라고 솔직하게 말합니다."
 )
 
 INTERRUPTED_SUFFIX = " (사용자가 중간에 끊음)"
 _KEEP_KEYS = ("role", "content")
+HINT_KEY = "hint"   # 마지막 user 메시지에 달린 이번 턴 참고 (어조 지시 등). 시스템 프롬프트 뒤에 붙는다
 
 
 def clean_messages(messages: list[dict]) -> list[dict]:
@@ -40,6 +48,14 @@ def clean_messages(messages: list[dict]) -> list[dict]:
             msg["content"] = str(msg.get("content", "")) + INTERRUPTED_SUFFIX
         out.append(msg)
     return out
+
+
+def turn_hint(messages: list[dict]) -> str:
+    """마지막 user 메시지의 이번 턴 참고(hint). 없으면 빈 문자열."""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            return str(m.get(HINT_KEY) or "").strip()
+    return ""
 
 
 class OpenAIStreamLLM:
@@ -77,10 +93,14 @@ class OpenAIStreamLLM:
             await self._session.close()
         self._session = None
 
+    def _system(self, messages: list[dict]) -> str:
+        hint = turn_hint(messages)
+        return f"{self.system_prompt} 이번 대답의 참고: {hint}" if hint else self.system_prompt
+
     def build_body(self, messages: list[dict], stream: bool = True) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self.model,
-            "messages": [{"role": "system", "content": self.system_prompt}, *clean_messages(messages)],
+            "messages": [{"role": "system", "content": self._system(messages)}, *clean_messages(messages)],
             "stream": stream,
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,

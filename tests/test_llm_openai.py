@@ -107,3 +107,20 @@ async def test_cancel_closes_connection():
         await llm.close()
         await runner.cleanup()
     assert any(isinstance(e, Token) for e in got)
+
+
+def test_turn_hint_appended_to_system_prompt_only_from_last_user_message():
+    llm = OpenAIStreamLLM(base_url="http://x/v1")
+    msgs = [{"role": "user", "content": "안녕", "hint": "옛 참고"},
+            {"role": "assistant", "content": "네."},
+            {"role": "user", "content": "요즘 잠이 안 와요", "hint": "지친 목소리입니다. 천천히 위로하는 어조로 말합니다."}]
+    body = llm.build_body(msgs)
+    sys_msg = body["messages"][0]["content"]
+    assert sys_msg.startswith(llm.system_prompt) and "지친 목소리" in sys_msg and "옛 참고" not in sys_msg
+    assert all("hint" not in m for m in body["messages"])
+
+
+def test_no_hint_keeps_system_prompt_unchanged():
+    llm = OpenAIStreamLLM(base_url="http://x/v1")
+    body = llm.build_body([{"role": "user", "content": "안녕하세요"}])
+    assert body["messages"][0]["content"] == llm.system_prompt
