@@ -13,8 +13,15 @@ SOFT_MARKS = (",", "、")
 
 
 class SemanticChunker:
-    def __init__(self, first_min: int = 8, min_chars: int = 15, max_chars: int = 40):
+    def __init__(
+        self,
+        first_min: int = 8,
+        min_chars: int = 15,
+        max_chars: int = 40,
+        skip_filler_comma: bool = False,
+    ):
         self.first_min, self.min_chars, self.max_chars = first_min, min_chars, max_chars
+        self.skip_filler_comma = skip_filler_comma
         self.buf, self.first = "", True
 
     def feed(self, token: str) -> list[str]:
@@ -57,6 +64,10 @@ class SemanticChunker:
             end = ch in END_MARKS or (self.first and ch in SOFT_MARKS)
             if not end:
                 continue
+            if self.skip_filler_comma and self.first and ch in SOFT_MARKS:
+                part = buf[: i + 1].strip()
+                if part[:-1].strip() in ("네", "아", "음", "예", "응"):
+                    continue
             if ch == "." and i > 0 and buf[i - 1].isdigit():
                 if i == len(buf) - 1:
                     return None   # 다음 토큰을 보고 정한다

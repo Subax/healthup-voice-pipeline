@@ -51,3 +51,28 @@ def test_two_sentences_in_one_token_with_min_chars():
 
 def test_decimal_inside_a_single_token_is_not_split():
     assert run(["체온은 36.5도", "입니다."]) == ["체온은 36.5도입니다."]
+
+
+def test_default_skip_filler_comma_false_splits_filler():
+    """기본값(False)에서는 first_min=2일 때 군더더기 쉼표에서 잘린다."""
+    out = run(["네,", " 그러셨군요."], first_min=2)
+    assert out == ["네,", "그러셨군요."]
+
+
+def test_skip_filler_comma_true_skips_fillers():
+    """skip_filler_comma=True이면 군더더기('네,', '아,', '음,', '예,', '응,') 뒤 쉼표 분할을 건너뛴다."""
+    for filler in ("네,", "아,", "음,", "예,", "응,"):
+        out = run([filler, " 그러셨군요."], first_min=2, skip_filler_comma=True)
+        assert out == [f"{filler} 그러셨군요."]
+
+
+def test_skip_filler_comma_true_retains_normal_comma():
+    """군더더기가 아닌 일반 쉼표는 skip_filler_comma=True여도 정상 분할된다."""
+    out = run(["오늘 결과를 보면,", " 혈압이 높아요."], first_min=2, skip_filler_comma=True)
+    assert out == ["오늘 결과를 보면,", "혈압이 높아요."]
+
+
+def test_skip_filler_comma_true_does_not_skip_words_starting_with_filler():
+    """'아침에는,'처럼 군더더기 글자로 시작하지만 다른 단어는 쉼표 분할된다."""
+    out = run(["아침에는,", " 날씨가 맑아요."], first_min=2, skip_filler_comma=True)
+    assert out == ["아침에는,", "날씨가 맑아요."]

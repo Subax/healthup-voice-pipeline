@@ -8,7 +8,11 @@ import json
 from aiohttp import web
 
 from voice_pipeline.llm.events import Done, Meta, Token
-from voice_pipeline.llm.openai_stream import OpenAIStreamLLM
+from voice_pipeline.llm.openai_stream import (
+    DEFAULT_SYSTEM_PROMPT,
+    PROMPT_NO_FILLER,
+    OpenAIStreamLLM,
+)
 
 
 def _chunk(delta: dict, finish: str | None = None) -> bytes:
@@ -124,3 +128,10 @@ def test_no_hint_keeps_system_prompt_unchanged():
     llm = OpenAIStreamLLM(base_url="http://x/v1")
     body = llm.build_body([{"role": "user", "content": "안녕하세요"}])
     assert body["messages"][0]["content"] == llm.system_prompt
+
+
+def test_prompt_no_filler_constant_defined():
+    """PROMPT_NO_FILLER 상수가 정의되어 있고 기본 프롬프트와 구분되는지 검증."""
+    assert PROMPT_NO_FILLER != DEFAULT_SYSTEM_PROMPT
+    assert "군더더기 없이" in PROMPT_NO_FILLER
+    assert "네, 그러셨군요" not in PROMPT_NO_FILLER
