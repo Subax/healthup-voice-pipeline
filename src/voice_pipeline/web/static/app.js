@@ -18,16 +18,99 @@ const latRows = {};
 
 function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 
+// ---------- 모드 및 환경설정 (A2) ----------
+const DEFAULT_PREFS = {
+  wake: true,
+  face: false,
+  show_ai_notice: true,
+  show_camera_badge: true,
+  show_conn_status: true,
+  show_dev_info: false
+};
+
+let currentMode = localStorage.getItem("healthup_mode") || "demo";
+let prefs = Object.assign({}, DEFAULT_PREFS);
+try {
+  const saved = JSON.parse(localStorage.getItem("healthup_prefs") || "{}");
+  Object.assign(prefs, saved);
+} catch (e) {}
+
+function savePrefs() {
+  localStorage.setItem("healthup_prefs", JSON.stringify(prefs));
+  applyVisibility();
+}
+
+function setMode(newMode, notifyServer = true) {
+  if (newMode !== "demo" && newMode !== "dev") return;
+  currentMode = newMode;
+  localStorage.setItem("healthup_mode", currentMode);
+  if ($("modeDemo")) $("modeDemo").checked = (currentMode === "demo");
+  if ($("modeDev")) $("modeDev").checked = (currentMode === "dev");
+  applyVisibility();
+  if (notifyServer && ws && ws.readyState === 1) {
+    send({ type: "config", mode: currentMode });
+  }
+}
+
+function applyVisibility() {
+  // 1. AI 마음 건강 도우미 고지
+  if ($("aiNotice")) $("aiNotice").hidden = !prefs.show_ai_notice;
+  // 2. 카메라 / 대기 마이크 상태 배지
+  if ($("cameraBadge")) {
+    const parts = [];
+    if (prefs.face) parts.push("카메라 켜짐");
+    if (prefs.wake) parts.push("마이크 대기 중");
+    $("cameraBadge").textContent = parts.join(" · ") || "마이크 대기 중";
+    $("cameraBadge").hidden = !prefs.show_camera_badge || parts.length === 0;
+  }
+  // 3. 연결 상태 표시
+  if ($("connStatus")) $("connStatus").hidden = !prefs.show_conn_status;
+
+  // 4. 개발 패널 vs 데모 자리표시 카드 표시
+  const showDev = (currentMode === "dev" || prefs.show_dev_info);
+  if ($("micCard")) $("micCard").hidden = !showDev;
+  if ($("textCard")) $("textCard").hidden = !showDev;
+  if ($("logCard")) $("logCard").hidden = !showDev;
+  if ($("latCard")) $("latCard").hidden = !showDev;
+  if ($("epCard") && !showDev) $("epCard").hidden = true;
+
+  // 헤더 개발 정보 및 옵션 선택기 제어
+  if ($("engines")) $("engines").hidden = !showDev;
+  if ($("voiceWrap")) $("voiceWrap").hidden = !showDev || !$("voice") || $("voice").options.length === 0;
+  if ($("sttWrap")) $("sttWrap").hidden = !showDev || !$("stt") || $("stt").options.length === 0;
+  if ($("epWrap")) $("epWrap").hidden = !showDev || !$("endpoint") || $("endpoint").options.length === 0;
+
+  // 자리표시 영역 (데모 모드 기본 표시, 개발 모드에서는 show_dev_info 미설정 시 숨김)
+  if ($("avatarCard")) {
+    $("avatarCard").hidden = (currentMode === "dev" && !prefs.show_dev_info);
+  }
+
+  // 체크박스 상태 동기화
+  if ($("prefWake")) $("prefWake").checked = !!prefs.wake;
+  if ($("prefFace")) $("prefFace").checked = !!prefs.face;
+  if ($("prefAiNotice")) $("prefAiNotice").checked = !!prefs.show_ai_notice;
+  if ($("prefCameraBadge")) $("prefCameraBadge").checked = !!prefs.show_camera_badge;
+  if ($("prefConnStatus")) $("prefConnStatus").checked = !!prefs.show_conn_status;
+  if ($("prefDevInfo")) $("prefDevInfo").checked = !!prefs.show_dev_info;
+}
+
 // ---------- UI ----------
-// 턴 종료 판단 배지 (smart 모드). 확정 뒤 첫 avatar_state가 오면 풀린다
 let epBadge = null;
 function setBadge() {
-  if (epBadge) { $("badge").textContent = epBadge.text; $("badge").className = "badge " + epBadge.cls; return; }
-  const st = speakingLocal && lastState !== "safety" ? "speaking" : lastState;
   const names = { listening: "듣는 중", thinking: "생각 중", speaking: "말하는 중", safety: "안전 안내" };
-  $("badge").textContent = names[st] || st;
-  $("badge").className = "badge " + st;
+  const st = speakingLocal && lastState !== "safety" ? "speaking" : lastState;
+  const label = epBadge ? epBadge.text : (names[st] || st);
+  const cls = epBadge ? epBadge.cls : st;
+
+  $("badge").textContent = label;
+  $("badge").className = "badge " + cls;
+
+  if ($("avatarStatusText")) {
+    $("avatarStatusText").textContent = names[st] || st;
+    $("avatarStatusText").className = "avatar-status " + st;
+  }
 }
+
 function addMsg(cls, text) {
   const d = document.createElement("div");
   d.className = "msg " + cls; d.textContent = text;
@@ -57,13 +140,15 @@ function epTick() {
 }
 function onTurnEval(m) {
   const label = EP_LABEL[m.stage] || m.stage;
-  if (m.stage === "reopened") {  // 확정했던 턴의 말풍선에 취소선을 긋는다. 이어 붙인 전사는 새 말풍선으로 온다
+  if (m.stage === "reopened") {
     const us = document.querySelectorAll("#log .msg.user");
     if (us.length) us[us.length - 1].classList.add("merged");
   }
   const p = m.smart_turn_p == null ? "-" : m.smart_turn_p.toFixed(2);
   const e = m.ending || {};
-  $("epCard").hidden = false;
+  if (currentMode === "dev" || prefs.show_dev_info) {
+    $("epCard").hidden = false;
+  }
   $("epP").textContent = `Smart Turn p ${p}`;
   $("epEnd").textContent = `어미 ${e.category || "-"} ${e.morph ? "'" + e.morph + "'" : ""}`;
   $("epStt").textContent = `STT ${fmt(m.stt_ms)}ms${m.stt_punct ? " (문장부호)" : ""}`;
@@ -100,11 +185,12 @@ function onBegin(m) {
   cur = { id: m.turn_id, rate: m.sample_rate, gain, cursor: 0, chunks: [], ptr: 0, doneMs: 0, totalMs: 0,
           sources: [], started: false, dead: false, prog: null, startTimer: null, finTimer: null };
   speakingLocal = true; setBadge();
+  if ($("avatarVolWrap")) $("avatarVolWrap").hidden = false;
 }
 function onFrame(buf) {
   const dv = new DataView(buf);
   const tid = dv.getUint32(0, true);
-  if (!cur || cur.dead || cur.id !== tid || deadTurns.has(tid)) return; // 지난 턴 프레임은 버린다
+  if (!cur || cur.dead || cur.id !== tid || deadTurns.has(tid)) return;
   const n = (buf.byteLength - 10) >> 1;
   if (n <= 0) return;
   const pcm = new Int16Array(buf, 10, n);
@@ -115,18 +201,23 @@ function onFrame(buf) {
   const now = ctx.currentTime;
   let t = cur.cursor;
   if (!cur.started && cur.chunks.length === 0) t = now + JITTER;
-  else if (t < now + 0.005) t = now + 0.02;   // 언더런이면 다시 맞춘다
+  else if (t < now + 0.005) t = now + 0.02;
   src.start(t);
   const d = n / cur.rate;
   cur.cursor = t + d; cur.totalMs += d * 1000;
   cur.chunks.push({ t, d }); cur.sources.push(src);
-  if (cur.chunks.length === 1) { // 첫 프레임이 실제로 재생되는 시각에 started
+  if (cur.chunks.length === 1) {
     const turn = cur;
     turn.startTimer = setTimeout(() => {
       if (turn.dead) return;
       turn.started = true;
       send({ type: "playback", turn_id: turn.id, event: "started", played_ms: 0 });
-      turn.prog = setInterval(() => send({ type: "playback", turn_id: turn.id, event: "progress", played_ms: playedMs(turn) }), PROGRESS_MS);
+      turn.prog = setInterval(() => {
+        send({ type: "playback", turn_id: turn.id, event: "progress", played_ms: playedMs(turn) });
+        if ($("avatarLevel") && speakingLocal) {
+          $("avatarLevel").style.width = Math.min(100, Math.max(20, Math.random() * 70 + 20)) + "%";
+        }
+      }, PROGRESS_MS);
     }, Math.max(0, (t - now) * 1000));
   }
 }
@@ -138,6 +229,8 @@ function onEnd(m) {
     stopTimers(t);
     send({ type: "playback", turn_id: t.id, event: "finished", played_ms: t.totalMs });
     t.dead = true; speakingLocal = false; setBadge();
+    if ($("avatarVolWrap")) $("avatarVolWrap").hidden = true;
+    if ($("avatarLevel")) $("avatarLevel").style.width = "0";
   }, Math.max(0, (t.cursor - ctx.currentTime) * 1000) + 10);
 }
 function killTurn(t, fadeMs, report) {
@@ -149,6 +242,8 @@ function killTurn(t, fadeMs, report) {
   t.gain.gain.linearRampToValueAtTime(0, now + fadeMs / 1000);
   setTimeout(() => { t.sources.forEach((s) => { try { s.stop(); } catch (e) {} }); t.gain.disconnect(); }, fadeMs + 20);
   if (report) send({ type: "playback", turn_id: t.id, event: "stopped", played_ms: played });
+  if ($("avatarVolWrap")) $("avatarVolWrap").hidden = true;
+  if ($("avatarLevel")) $("avatarLevel").style.width = "0";
 }
 function onInterrupt(m) {
   deadTurns.add(m.turn_id);
@@ -161,6 +256,9 @@ function onInterrupt(m) {
 
 // ---------- 서버 메시지 ----------
 function onHello(m) {
+  if (m.mode && !localStorage.getItem("healthup_mode")) {
+    setMode(m.mode, false);
+  }
   $("engines").textContent = `llm=${m.engines.llm} tts=${m.engines.tts} stt=${m.engines.stt}` +
     (m.first_min != null ? ` first_min=${m.first_min}` : "") +
     (m.vad_silence_ms != null ? ` vad_silence=${m.vad_silence_ms}ms` : "");
@@ -168,26 +266,30 @@ function onHello(m) {
   sel.textContent = "";
   voices.forEach((v) => { const o = document.createElement("option"); o.value = v.id; o.textContent = v.label || v.id; sel.appendChild(o); });
   if (m.voice) sel.value = m.voice;
-  $("voiceWrap").hidden = voices.length === 0;
   const opts = m.stt_options || [], ss = $("stt");
   ss.textContent = "";
   opts.forEach((o) => { const e = document.createElement("option"); e.value = o.id; e.disabled = !o.available;
     e.textContent = (o.label || o.id) + (o.available ? "" : " (없음)"); ss.appendChild(e); });
   if (m.stt) ss.value = m.stt;
-  $("sttWrap").hidden = opts.length === 0;
   const eo = m.endpoint_options || [], es = $("endpoint");
   es.textContent = "";
   eo.forEach((o) => { const e = document.createElement("option"); e.value = o.id; e.textContent = o.label || o.id; es.appendChild(e); });
   if (m.endpoint) es.value = m.endpoint;
-  $("epWrap").hidden = eo.length === 0;
   $("epCard").hidden = true; epBadge = null; ep = null;
   if (m.backchannel != null) $("backchannel").checked = m.backchannel;
+  applyVisibility();
 }
+
 function onMessage(ev) {
   if (typeof ev.data !== "string") { if (ctx) onFrame(ev.data); return; }
   const m = JSON.parse(ev.data);
   switch (m.type) {
     case "hello": onHello(m); break;
+    case "mode_ready":
+      if (m.mode === "demo" || m.mode === "dev") {
+        setMode(m.mode, false);
+      }
+      break;
     case "duck": if (ctx && master) master.gain.setTargetAtTime(m.on ? DUCK_GAIN : 1, ctx.currentTime, 0.03); break;
     case "backchannel_ignored": addMsg("alt", `맞장구로 보고 무시: ${m.text || "(소리)"}`); break;
     case "pong": if (typeof m.t === "number") $("rtt").textContent = `RTT ${Math.round(performance.now() - m.t)} ms`; break;
@@ -220,7 +322,7 @@ function wsUrl() {
   return (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws" +
     (TOKEN ? "?t=" + encodeURIComponent(TOKEN) : "");
 }
-// ws를 연다. 열리면 config를 보낸다. 끊기면(wantRun일 때) 지수 백오프로 다시 연다
+
 function connect() {
   const mine = ws = new WebSocket(wsUrl());
   ws.binaryType = "arraybuffer";
@@ -228,23 +330,47 @@ function connect() {
   ws.onopen = () => {
     if (ws !== mine) return;
     retries = 0; setRunning(true);
-    send({ type: "config", barge_in: $("bargein").checked, backchannel: $("backchannel").checked });
+    send({
+      type: "config",
+      mode: currentMode,
+      wake: prefs.wake,
+      face: prefs.face,
+      show_dev_info: prefs.show_dev_info,
+      barge_in: $("bargein").checked,
+      backchannel: $("backchannel").checked
+    });
     lastState = "listening"; epBadge = null; setBadge();
   };
   ws.onclose = () => {
     if (ws !== mine) return;
-    resetPlayback();  // 서버 세션이 새로 생기므로 재생 중이던 턴은 버린다
-    if (!wantRun) { setRunning(false); $("badge").textContent = "연결 끊김"; $("badge").className = "badge"; return; }
-    $("badge").textContent = "재연결 중"; $("badge").className = "badge";
+    resetPlayback();
+    if (!wantRun) {
+      setRunning(false);
+      $("badge").textContent = "연결 끊김";
+      $("badge").className = "badge";
+      if ($("avatarStatusText")) {
+        $("avatarStatusText").textContent = "연결 끊김";
+        $("avatarStatusText").className = "avatar-status";
+      }
+      return;
+    }
+    $("badge").textContent = "재연결 중";
+    $("badge").className = "badge";
+    if ($("avatarStatusText")) {
+      $("avatarStatusText").textContent = "재연결 중";
+      $("avatarStatusText").className = "avatar-status";
+    }
     $("rtt").textContent = "RTT - ms";
     const delay = Math.min(5000, 500 * 2 ** retries++);
     retryTimer = setTimeout(() => { retryTimer = null; if (wantRun) connect(); }, delay);
   };
 }
+
 function resetPlayback() {
   if (cur && !cur.dead) { killTurn(cur, 0, false); }
   cur = null; deadTurns.clear(); speakingLocal = false;
 }
+
 async function start() {
   $("start").disabled = true;
   if (!ctx || ctx.state === "closed") {
@@ -273,7 +399,7 @@ async function start() {
     $("err").textContent = "마이크를 쓸 수 없습니다(" + e.message + "). 텍스트 입력으로 시험하세요. localhost 또는 HTTPS 주소여야 합니다.";
   }
 }
-// RTT: 2초마다 ping을 보내고 pong이 오면 표시한다
+
 setInterval(() => send({ type: "ping", t: performance.now() }), 2000);
 
 function setRunning(on) {
@@ -282,7 +408,12 @@ function setRunning(on) {
   $("start").classList.toggle("primary", !on);
   $("start").disabled = false;
   $("stopAnswer").disabled = !on;
+  if ($("avatarCard")) {
+    $("avatarCard").classList.toggle("running", on);
+    $("avatarHint").textContent = on ? "대화 진행 중입니다 (편하게 말씀하세요)" : "화면을 터치하여 대화를 시작하세요";
+  }
 }
+
 function stopAll() {
   wantRun = false; clearTimeout(retryTimer); retryTimer = null;
   send({ type: "stop" });
@@ -290,12 +421,18 @@ function stopAll() {
   if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
   if (micNode) { micNode.port.onmessage = null; micNode.disconnect(); micNode = null; }
   $("level").style.width = "0"; $("vad").classList.remove("on");
-  const old = ws; ws = null;   // onclose가 상태 표시를 덮어쓰지 않게 먼저 뗀다
-  if (old) old.onmessage = null; // 중지 뒤 늦게 오는 avatar_state가 「중지됨」을 덮지 않게 한다
-  setTimeout(() => { try { old.close(); } catch (e) {} }, 200); // stop 메시지가 나간 뒤 닫는다
+  const old = ws; ws = null;
+  if (old) old.onmessage = null;
+  setTimeout(() => { try { old.close(); } catch (e) {} }, 200);
   lastState = "listening"; epBadge = null; ep = null; setRunning(false);
   $("badge").textContent = "중지됨"; $("badge").className = "badge"; $("rtt").textContent = "RTT - ms";
+  if ($("avatarStatusText")) {
+    $("avatarStatusText").textContent = "중지됨";
+    $("avatarStatusText").className = "avatar-status";
+  }
 }
+
+// ---------- 이벤트 리스너 등록 ----------
 $("start").onclick = () => (running ? stopAll() : start());
 $("stopAnswer").onclick = () => send({ type: "stop" });
 $("endpoint").onchange = () => send({ type: "config", endpoint: $("endpoint").value });
@@ -311,3 +448,66 @@ $("form").onsubmit = (e) => {
   $("text").value = "";
   send({ type: "text_input", text: t });
 };
+
+// 자리표시 카드 클릭 시 최초 시작
+$("avatarCard").onclick = () => {
+  if (!running) {
+    start();
+  }
+};
+
+// 설정 패널 및 모드 토글
+$("settingsBtn").onclick = () => {
+  $("settingsPanel").hidden = !$("settingsPanel").hidden;
+};
+
+$("modeDemo").onchange = () => setMode("demo");
+$("modeDev").onchange = () => setMode("dev");
+
+// 개별 기능 체크박스
+$("prefWake").onchange = (e) => {
+  prefs.wake = e.target.checked;
+  savePrefs();
+  send({ type: "config", wake: prefs.wake });
+};
+
+$("prefFace").onchange = (e) => {
+  prefs.face = e.target.checked;
+  savePrefs();
+  send({ type: "config", face: prefs.face });
+};
+
+$("prefAiNotice").onchange = (e) => {
+  if (!e.target.checked) {
+    const ok = window.confirm("AI 기본법 제31조에 따른 법적 의무 고지입니다. 내부 시험 목적으로만 숨기시겠습니까?");
+    if (!ok) {
+      e.target.checked = true;
+      return;
+    }
+  }
+  prefs.show_ai_notice = e.target.checked;
+  savePrefs();
+  send({ type: "config", show_ai_notice: prefs.show_ai_notice });
+};
+
+$("prefCameraBadge").onchange = (e) => {
+  prefs.show_camera_badge = e.target.checked;
+  savePrefs();
+  send({ type: "config", show_camera_badge: prefs.show_camera_badge });
+};
+
+$("prefConnStatus").onchange = (e) => {
+  prefs.show_conn_status = e.target.checked;
+  savePrefs();
+  send({ type: "config", show_conn_status: prefs.show_conn_status });
+};
+
+$("prefDevInfo").onchange = (e) => {
+  prefs.show_dev_info = e.target.checked;
+  savePrefs();
+  send({ type: "config", show_dev_info: prefs.show_dev_info });
+};
+
+// 초기화 적용
+setMode(currentMode, false);
+applyVisibility();
