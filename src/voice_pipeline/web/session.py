@@ -91,6 +91,9 @@ class DemoSession:
         self.speculate = bool(getattr(engines, "speculate", True))  # 선행 생성 (대기 중 LLM·TTS 먼저)
         self._spec: _Spec | None = None
         self.endpoint_mode = engines.endpoint_default if engines.endpoint_default in ("smart", "fixed") else "smart"
+        self.mode = getattr(engines, "default_mode", "demo")
+        if self.mode not in ("demo", "dev"):
+            self.mode = "demo"
         self.vad = self._new_vad()
         self.endpointer = TurnEndpointer(
             lambda: self._stt(), engines.endpoint_scorer, self._emit_turn_eval, self._on_turn_confirmed,
@@ -147,7 +150,7 @@ class DemoSession:
             voices = [{"id": AUTO, "label": AUTO_LABEL}, *voices]
             if self.voice_auto:
                 voice = AUTO
-        await self.send({"type": "hello", "engines": self.engines.labels, "barge_in": self.barge_in_enabled,
+        await self.send({"type": "hello", "mode": self.mode, "engines": self.engines.labels, "barge_in": self.barge_in_enabled,
                          "backchannel": self.backchannel_enabled,
                          "first_min": self.engines.first_min, "vad_silence_ms": self.engines.vad_silence_ms,
                          "voices": voices, "voice": voice,
@@ -254,6 +257,10 @@ class DemoSession:
                     self._clear_probe()
             if "backchannel" in msg:
                 self.backchannel_enabled = bool(msg["backchannel"]) and self.engines.backchannel is not None
+            mode = msg.get("mode")
+            if mode in ("demo", "dev"):
+                self.mode = mode
+                await self.send({"type": "mode_ready", "mode": self.mode})
             voice = msg.get("voice")
             if isinstance(voice, str) and voice:
                 # 엔진은 공유다. 탭 하나만 쓴다는 전제 (README 참고)
