@@ -518,3 +518,40 @@ async def test_no_reopen_after_tts_audio_started(tmp_path):
         await ws.close()
     finally:
         await c.close()
+
+
+async def test_b1_dev_events_and_spoken_text(client):
+    ws = await client.ws_connect("/ws")
+    hello = await recv(ws)
+    assert hello["type"] == "hello"
+
+    # 1) 텍스트 입력 턴: session_state, intent, hint, spoken_text 확인
+    await ws.send_str(json.dumps({"type": "text_input", "text": "혈압 알려줘"}))
+    msgs: list = []
+    done = await until(ws, is_type("turn_done"), msgs)
+
+    # dev_event (intent, hint) 및 session_state 확인
+    dev_events = [m for m in msgs if isinstance(m, dict) and m["type"] == "dev_event"]
+    assert any(m["event"] == "intent" and m["intent"] == "TALK" for m in dev_events)
+    assert any(m["event"] == "hint" and m["rule"] == "R0" for m in dev_events)
+    assert any(isinstance(m, dict) and m.get("type") == "session_state" and m.get("state") == "active" for m in msgs)
+    assert done["spoken_text"] is not None and len(done["spoken_text"]) > 0
+
+    # 2) 끼어들기 시 duck 및 interrupt dev_event 확인
+    await ws.send_str(json.dumps({"type": "text_input", "text": "긴 답변을 해줘"}))
+    msgs.clear()
+    await until(ws, lambda m: isinstance(m, tuple), msgs)  # 오디오 재생 프레임 수신
+    for _ in range(3):
+        await ws.send_bytes(LOUD * 2)
+    # duck dev_event 수신 확인 (duck_latency_ms 포함)
+    duck_ev = await until(ws, lambda m: isinstance(m, dict) and m.get("type") == "dev_event" and m.get("event") == "duck" and m.get("on") is True, msgs)
+    assert duck_ev["duck_latency_ms"] is not None and duck_ev["duck_latency_ms"] >= 0.0
+
+    # 발화 지속으로 interrupt 발생
+    for _ in range(5):
+        await ws.send_bytes(LOUD * 2)
+    await until(ws, is_type("interrupt"), msgs)
+    inter_ev = next((m for m in msgs if isinstance(m, dict) and m.get("type") == "dev_event" and m.get("event") == "interrupt"), None)
+    assert inter_ev is not None
+    assert inter_ev["turn_id"] is not None and inter_ev["played_ms"] is not None
+    await ws.close()

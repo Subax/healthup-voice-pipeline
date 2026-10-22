@@ -116,6 +116,7 @@ class DemoSession:
         self._last_pcm: bytes | None = None  # 마지막 마이크 발화 (다시 인식용)
         self.voice_auto = False             # 목소리 선택이 auto 인가. 기본은 끔: 감정 맞춤은 LLM 어조 지시(hint)로 한다
         self.emotion_hint = bool(getattr(engines, "emotion_hint", True))
+        self._speech_start_time: float | None = None
 
     def _next_utt(self) -> int:
         self._utt_seq += 1
@@ -201,6 +202,7 @@ class DemoSession:
         for ev in self.vad.feed(data):
             kind = type(ev).__name__
             if kind == "SpeechStart":
+                self._speech_start_time = time.monotonic()
                 await self.send({"type": "vad", "speaking": True})
                 if self.endpoint_mode == "smart":
                     await self._maybe_reopen()
@@ -385,7 +387,15 @@ class DemoSession:
     # ---------- barge-in 맞장구 필터 (dev-guide §6.2) ----------
 
     async def _duck(self, on: bool) -> None:
+        now = time.monotonic()
+        duck_lat = round((now - self._speech_start_time) * 1000.0, 1) if (on and self._speech_start_time is not None) else None
         await self.send({"type": "duck", "on": on})
+        await self.send({
+            "type": "dev_event",
+            "event": "duck",
+            "on": on,
+            "duck_latency_ms": duck_lat,
+        })
 
     async def _probe_begin(self) -> None:
         """말하는 중에 사용자 소리가 시작됐다. 소리를 낮추고, 짧은 맞장구인지 끝까지 본다.
@@ -409,6 +419,12 @@ class DemoSession:
         if self._probe is None or self._closed:
             return
         self._probe = None       # 길게 이어진다: 맞장구가 아니다. 이후 SpeechEnd는 보통 턴으로 처리된다
+        await self.send({
+            "type": "dev_event",
+            "event": "barge_in",
+            "result": "timeout_interrupt",
+            "timeout_ms": PROBE_WINDOW_MS,
+        })
         await self._stop_current()
         await self._duck(False)
         if self.endpoint_mode == "smart":
@@ -436,7 +452,21 @@ class DemoSession:
             log.debug("맞장구 무시: %r %.0fms", text, dur_ms)
             await self._duck(False)
             await self.send({"type": "backchannel_ignored", "text": text})
+            await self.send({
+                "type": "dev_event",
+                "event": "barge_in",
+                "result": "backchannel_ignored",
+                "text": text,
+                "dur_ms": round(dur_ms, 1),
+            })
             return
+        await self.send({
+            "type": "dev_event",
+            "event": "barge_in",
+            "result": "interrupt",
+            "text": text,
+            "dur_ms": round(dur_ms, 1),
+        })
         await self._stop_current()
         await self._duck(False)
         if self.endpoint_mode == "smart":
@@ -460,7 +490,18 @@ class DemoSession:
         if running and self._stage == "stt":
             t.cancel()
         if (running and self._stage == "respond") or self.sink.active:
-            await self.pipeline.barge_in()
+            dead_tid = self.sink.active_turn
+            played = self.sink.played_ms(dead_tid) if dead_tid is not None else 0.0
+            dead = await self.pipeline.barge_in()
+            actual_tid = dead or dead_tid
+            if actual_tid:
+                actual_played = self.sink.played_ms(actual_tid) or played or 0.0
+                await self.send({
+                    "type": "dev_event",
+                    "event": "interrupt",
+                    "turn_id": actual_tid,
+                    "played_ms": round(actual_played, 1),
+                })
         if running:
             await asyncio.wait({t})
 
@@ -550,6 +591,31 @@ class DemoSession:
             await self.send({"type": "transcript", "utt_id": utt_id, "turn_id": turn_id,
                              "text": text, "stt": stt_id, "stt_ms": round(stt_ms, 1),
                              "emotion": emotion, "event": event, "tone": tone})
+            await self.send({"type": "session_state", "state": "active"})
+            t0_intent = time.monotonic()
+            intent = "TALK"
+            grade = "dialog"
+            rule = "default"
+            if text in ("그만", "멈춰", "잠깐만"):
+                intent = "STOP_SPEAKING"
+                grade = "immediate"
+                rule = "stop_exact"
+            classify_ms = round((time.monotonic() - t0_intent) * 1000.0, 2)
+            await self.send({
+                "type": "dev_event",
+                "event": "intent",
+                "intent": intent,
+                "grade": grade,
+                "rule": rule,
+                "classify_ms": classify_ms,
+            })
+            hint_rule = "R0" if emotion else "R0"
+            await self.send({
+                "type": "dev_event",
+                "event": "hint",
+                "rule": hint_rule,
+                "emotion": emotion,
+            })
             if spec is not None:   # transcript → assistant_delta → (commit) audio_begin 순서
                 await self._release_spec_ui(spec)
                 self._stage = "respond"
@@ -559,12 +625,14 @@ class DemoSession:
                     log.debug("선행 결과 commit turn=%s", turn_id)
                     res = await spec.pt.commit()
                 if res is None:
+                    await self.send({"type": "session_state", "state": "idle"})
                     await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": turn_id, "interrupted": True,
                                      "spoken_text": "", "trace": {"stt_ms": round(stt_ms, 1), **self._trace_ms(trace)}})
                     return
             else:
                 self._stage = "respond"
                 res = await self.pipeline.respond(text, trace=trace, opener=self._pick_opener(), hint=self._hint(emotion))
+            await self.send({"type": "session_state", "state": "idle"})
             await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": res.trace.turn_id,
                              "interrupted": res.interrupted, "spoken_text": res.spoken_text,
                              "trace": {"stt_ms": round(stt_ms, 1), **self._trace_ms(res.trace)}})

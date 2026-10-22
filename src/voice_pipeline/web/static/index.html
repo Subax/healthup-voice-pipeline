@@ -64,6 +64,12 @@ th { color:var(--muted); font-weight:600; }
 .avatar-hint { color:var(--muted); font-size:15px; }
 .avatar-meter { width:240px; margin-top:16px; height:8px; }
 
+/* B1 개발 패널 스타일 */
+.msg.dev { background:rgba(100,120,150,0.08); color:var(--muted); font-size:13px; font-family:ui-monospace, monospace; border-left:3px solid var(--accent); }
+.spoken-text { font-size:12px; color:var(--muted); margin-top:4px; font-style:italic; }
+.summary-row { background:rgba(47,111,237,0.06); font-weight:600; }
+.summary-row th, .summary-row td { border-bottom:2px solid var(--line); color:var(--accent); }
+
 @media (max-width:700px) { main { grid-template-columns:1fr; } }
 </style>
 </head>
@@ -152,7 +158,19 @@ th { color:var(--muted); font-weight:600; }
   <section class="card wide" id="latCard">
     <h2>턴별 지연 (ms, 실제 발화 끝 기준 — 턴 종료 방식과 무관하게 같은 기준)</h2>
     <table>
-      <thead><tr><th>턴</th><th>STT</th><th>→ 턴 확정</th><th>→ LLM 첫 토큰</th><th>→ 첫 청크</th><th>→ 맞장구</th><th>→ TTS 첫 오디오</th><th>→ 재생 시작</th></tr></thead>
+      <thead>
+        <tr><th>턴</th><th>STT</th><th>→ 턴 확정</th><th>→ LLM 첫 토큰</th><th>→ 첫 청크</th><th>→ 맞장구</th><th>→ TTS 첫 오디오</th><th>→ 재생 시작</th></tr>
+        <tr id="latSummary" class="summary-row">
+          <th id="latSumLabel">P50 / P90 (0턴)</th>
+          <td id="latSum_stt_ms">-</td>
+          <td id="latSum_turn_confirmed">-</td>
+          <td id="latSum_llm_first_token">-</td>
+          <td id="latSum_first_chunk">-</td>
+          <td id="latSum_backchannel">-</td>
+          <td id="latSum_tts_first_audio">-</td>
+          <td id="latSum_playback_start">-</td>
+        </tr>
+      </thead>
       <tbody id="lat"></tbody>
     </table>
   </section>

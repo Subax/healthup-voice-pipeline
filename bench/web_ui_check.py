@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from aiohttp import web
 from playwright.async_api import async_playwright, Dialog
 
+from voice_pipeline.trace import percentile
 from voice_pipeline.web.app import create_app
 from voice_pipeline.web.engines import build_engines
 
@@ -36,6 +37,11 @@ from voice_pipeline.web.engines import build_engines
 async def run_server(port: int = 8795) -> tuple[web.AppRunner, web.TCPSite]:
     """Mock 엔진 기반 데모 웹 서버 실행 (8790이 아닌 독립 포트)."""
     engines = build_engines("mock", "mock", "mock", default_mode="demo")
+    engines.tts.first_audio_ms = 10.0
+    engines.tts.ms_per_char = 25.0
+    engines.tts.rtf = 0.01
+    engines.llm.ttft_ms = 50.0
+    engines.llm.tokens_per_s = 200.0
     app = create_app(engines)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -459,11 +465,148 @@ async def check_10_pref_reload_persistence(page, base_url: str, ws_sent: list[st
     await asyncio.sleep(0.1)
 
 
+async def check_11_dev_panel_b1(page) -> None:
+    """11. B1 개발 패널 검사 (3턴 + 끼어들기 1회, §2.3 항목 9종 검증, P50/P90 요약 검증)."""
+    # 개발 모드 활성화 (헤더 옵션 및 모든 패널 노출)
+    if await page.is_hidden("#settingsPanel"):
+        await page.click("#settingsBtn")
+        await page.wait_for_selector("#settingsPanel:not([hidden])")
+    await page.click("#modeDev")
+    if not await page.is_hidden("#settingsPanel"):
+        await page.click("#settingsBtn")
+    await asyncio.sleep(0.1)
+
+    # 세션 시작 확인 및 마이크 음소거 (가짜 디바이스 지속 비프음 방지, sendPcm으로 직접 주입)
+    is_running = await page.evaluate("() => typeof running !== 'undefined' && running")
+    if not is_running:
+        await page.click("#start")
+        await asyncio.sleep(0.3)
+    await page.evaluate("() => { window.micMuted = true; }")
+
+    # 이전 메시지 및 지연 기록 리셋
+    await page.click("#reset")
+    await asyncio.sleep(0.2)
+
+    async def wait_for_turn(expected_cnt: int, timeout: float = 6.0) -> None:
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            ok = await page.evaluate(f"""() => {{
+                const botEls = document.querySelectorAll('#log .msg.bot');
+                const spokenEls = document.querySelectorAll('#log .spoken-text');
+                const tracesCnt = Object.keys(window.traces || {{}}).length;
+                const notSpeaking = !speakingLocal && (!cur || cur.dead);
+                return (botEls.length >= {expected_cnt} && spokenEls.length >= {expected_cnt} && tracesCnt >= {expected_cnt} && notSpeaking);
+            }}""")
+            if ok:
+                return
+            await asyncio.sleep(0.05)
+        raise TimeoutError(f"Turn {expected_cnt} 완료 대기 시간 초과")
+
+    # Turn 1: 음성 발화 (LOUD 10 프레임 + QUIET 16 프레임)
+    # EnergyVAD -> Smart Turn (turn_eval) -> STT -> LLM -> TTS -> turn_done
+    await page.evaluate("() => window.sendPcm(10, 16)")
+    await wait_for_turn(1)
+
+    # Turn 2: 텍스트 입력
+    await page.fill("#text", "오늘 혈압 결과 알려줘")
+    await page.press("#text", "Enter")
+    await wait_for_turn(2)
+
+    # Turn 3: 텍스트 입력
+    await page.fill("#text", "스트레스 관리법 알려줘")
+    await page.press("#text", "Enter")
+    await wait_for_turn(3)
+
+    # Turn 4: 끼어들기 (답변 도중 발화로 interrupt 유도)
+    await page.fill("#text", "긴 이야기를 들려주세요")
+    await page.press("#text", "Enter")
+    # 답변 생성/재생 시작 대기
+    for _ in range(50):
+        await asyncio.sleep(0.05)
+        active = await page.evaluate("() => speakingLocal || (typeof cur !== 'undefined' && cur !== null && !cur.dead) || (document.querySelectorAll('#log .msg.bot').length >= 4)")
+        if active:
+            break
+    # 말하는 중에 큰 소리 35프레임(700ms > PROBE_WINDOW_MS 600ms) 전송 -> duck -> barge_in -> interrupt
+    await page.evaluate("() => window.sendPcm(35, 0)")
+    for _ in range(60):
+        await asyncio.sleep(0.1)
+        cnt = await page.evaluate("() => Object.keys(window.traces || {}).length")
+        if cnt >= 4:
+            break
+    cnt4 = await page.evaluate("() => Object.keys(window.traces || {}).length")
+    assert cnt4 >= 4, f"Turn 4 (끼어들기) 완료 실패: cnt={cnt4}"
+
+    # §2.3 개발 모드 표시 항목 9종 검증
+    # 1. 구간별 지연 표 행
+    lat_rows = await page.query_selector_all("#lat tr")
+    assert len(lat_rows) >= 4, f"1) 지연 표 행 수 부족: {len(lat_rows)}"
+
+    # 2. 지연 요약 줄 (P50/P90 요약 줄 및 ±1ms 일치 검증)
+    lat_sum_label = await page.text_content("#latSumLabel")
+    assert "P50 / P90" in lat_sum_label, f"2) 요약 줄 라벨 오류: {lat_sum_label}"
+    traces_dict = await page.evaluate("() => window.traces")
+    traces_list = list(traces_dict.values())
+    metric_keys = ["stt_ms", "turn_confirmed", "llm_first_token", "first_chunk", "tts_first_audio"]
+    for k in metric_keys:
+        vals = [t[k] for t in traces_list if k in t and isinstance(t[k], (int, float))]
+        if vals:
+            exp_p50 = percentile(vals, 50)
+            exp_p90 = percentile(vals, 90)
+            dom_text = await page.text_content(f"#latSum_{k}")
+            parts = dom_text.split(" / ")
+            assert len(parts) == 2, f"#latSum_{k} 포맷 오류: {dom_text}"
+            act_p50, act_p90 = float(parts[0]), float(parts[1])
+            assert abs(act_p50 - round(exp_p50)) <= 1.0, f"2) {k} P50 불일치: act={act_p50}, exp={round(exp_p50)}"
+            assert abs(act_p90 - round(exp_p90)) <= 1.0, f"2) {k} P90 불일치: act={act_p90}, exp={round(exp_p90)}"
+
+    # 3. 전사문
+    user_msgs = await page.query_selector_all("#log .msg.user")
+    assert len(user_msgs) >= 4, f"3) 사용자 전사문 메시지 부족: {len(user_msgs)}"
+
+    # 4. LLM 응답 및 들린 부분 (spoken_text)
+    bot_msgs = await page.query_selector_all("#log .msg.bot")
+    assert len(bot_msgs) >= 4, f"4) LLM 봇 응답 메시지 부족: {len(bot_msgs)}"
+    assert len(bot_msgs) >= 4, f"4) LLM 봇 응답 메시지 부족: {len(bot_msgs)}"
+    spoken_els = await page.query_selector_all("#log .spoken-text")
+    assert len(spoken_els) >= 1, "4) spoken_text (들린 부분) 요소 누락"
+    spoken_sample = await spoken_els[0].text_content()
+    assert "들린 부분" in spoken_sample, f"4) spoken_text 문구 오류: {spoken_sample}"
+
+    # 5. 감정 태그 및 hint 규칙 번호
+    dev_msgs = [await el.text_content() for el in await page.query_selector_all("#log .msg.dev")]
+    hint_events = [m for m in dev_msgs if "[감정/hint]" in m]
+    assert len(hint_events) >= 1, f"5) hint 규칙 dev_event 누락: {dev_msgs}"
+    assert any("규칙: R0" in m for m in hint_events), f"5) hint 규칙 내용 오류: {hint_events}"
+
+    # 6. 턴 종료 판단 (사유, Smart Turn p 등)
+    judge_msgs = await page.query_selector_all("#log .msg.judge")
+    assert len(judge_msgs) >= 1, f"6) 턴 종료 판단(turn_eval) 메시지 누락: {await page.text_content('#log')}"
+    judge_text = await judge_msgs[0].text_content()
+    assert "[판단]" in judge_text, f"6) turn_eval 내용 오류: {judge_text}"
+
+    # 7. barge-in 이벤트 (덕킹 켬/끔 및 덕킹 지연 ms, 판별/끊김)
+    barge_events = [m for m in dev_msgs if "[barge-in]" in m]
+    assert len(barge_events) >= 1, f"7) barge-in dev_event 누락: {dev_msgs}"
+    duck_lat_events = [m for m in barge_events if "덕킹 켜짐" in m and "지연" in m]
+    assert len(duck_lat_events) >= 1, f"7) 덕킹 지연 ms 포함 dev_event 누락: {barge_events}"
+    assert any("끊김:" in m or "판별:" in m for m in barge_events), f"7) 끼어들기/판별 dev_event 누락: {barge_events}"
+
+    # 8. 의도 판정 (의도, 등급, 규칙, 분류 ms)
+    intent_events = [m for m in dev_msgs if "[의도]" in m]
+    assert len(intent_events) >= 1, f"8) 의도 판정 dev_event 누락: {dev_msgs}"
+    assert any("TALK" in m and "등급:" in m for m in intent_events), f"8) 의도 내용 오류: {intent_events}"
+
+    # 9. 세션 상태 (대기 / 진행)
+    state_events = [m for m in dev_msgs if "[세션]" in m]
+    assert len(state_events) >= 1, f"9) 세션 상태 dev_event 누락: {dev_msgs}"
+    assert any("active" in m or "idle" in m for m in state_events), f"9) 세션 상태 내용 오류: {state_events}"
+
+
 async def main() -> None:
     port = 8795
     base_url = f"http://127.0.0.1:{port}"
     print("=" * 70)
-    print("  HealthUp 웹 애플리케이션 화면 2모드 및 개별 토글 검사 시작 (A2)")
+    print("  HealthUp 웹 애플리케이션 화면 2모드 및 개발 패널 검사 시작 (A2·B1)")
     print(f"  테스트 서버 포트: {port}")
     print("=" * 70)
 
@@ -481,6 +624,7 @@ async def main() -> None:
         ("8. 개별 토글 및 카메라 배지 (③, 필수 3)", check_8_pref_toggles_ui),
         ("9. 개별 토글 config 전송 (⑤)", lambda p: check_9_pref_config_frames(p, ws_sent)),
         ("10. 새로고침 유지 및 재연결 config (⑥, 필수 2)", lambda p: check_10_pref_reload_persistence(p, base_url, ws_sent)),
+        ("11. B1 개발 패널 (3턴+끼어들기, 9종 표시, P50/P90)", check_11_dev_panel_b1),
     ]
 
     passed = 0

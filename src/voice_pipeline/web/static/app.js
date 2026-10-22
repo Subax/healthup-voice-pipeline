@@ -118,7 +118,36 @@ function addMsg(cls, text) {
   return d;
 }
 function fmt(v) { return v == null ? "-" : Math.round(v); }
-const traces = {};
+const traces = window.traces = {};
+
+function calcPercentile(values, p) {
+  if (!values || !values.length) return null;
+  const xs = values.slice().sort((a, b) => a - b);
+  if (xs.length === 1) return xs[0];
+  const k = (xs.length - 1) * p / 100.0;
+  const lo = Math.floor(k), hi = Math.min(lo + 1, xs.length - 1);
+  return xs[lo] + (xs[hi] - xs[lo]) * (k - lo);
+}
+
+function updateLatSummary() {
+  const metricKeys = ["stt_ms", "turn_confirmed", "llm_first_token", "first_chunk", "backchannel", "tts_first_audio", "playback_start"];
+  const turns = Object.values(traces);
+  const n = turns.length;
+  if ($("latSumLabel")) $("latSumLabel").textContent = `P50 / P90 (${n}턴)`;
+  for (const key of metricKeys) {
+    const vals = turns.map(t => t[key]).filter(v => typeof v === "number" && !isNaN(v));
+    const el = $("latSum_" + key);
+    if (!el) continue;
+    if (!vals.length) {
+      el.textContent = "-";
+    } else {
+      const p50 = calcPercentile(vals, 50);
+      const p90 = calcPercentile(vals, 90);
+      el.textContent = `${Math.round(p50)} / ${Math.round(p90)}`;
+    }
+  }
+}
+
 function setLatency(turn_id, upd) {
   const tr = traces[turn_id] = traces[turn_id] || {};
   for (const k in upd) if (upd[k] != null) tr[k] = upd[k]; // 늦게 오는 값(playback_start)만 채운다
@@ -126,6 +155,7 @@ function setLatency(turn_id, upd) {
   if (!tr_el) { tr_el = latRows[turn_id] = document.createElement("tr"); $("lat").prepend(tr_el); }
   const cells = [`#${turn_id}`, tr.stt_ms, tr.turn_confirmed, tr.llm_first_token, tr.first_chunk, tr.backchannel, tr.tts_first_audio, tr.playback_start];
   tr_el.innerHTML = cells.map((c, i) => `<td>${i ? fmt(c) : c}</td>`).join("");
+  updateLatSummary();
 }
 
 // ---------- 턴 종료 판단 (smart) ----------
@@ -291,6 +321,23 @@ function onMessage(ev) {
       }
       break;
     case "duck": if (ctx && master) master.gain.setTargetAtTime(m.on ? DUCK_GAIN : 1, ctx.currentTime, 0.03); break;
+    case "dev_event":
+      if (m.event === "duck") {
+        const lat = m.duck_latency_ms != null ? ` (지연 ${m.duck_latency_ms}ms)` : "";
+        addMsg("dev", `[barge-in] 덕킹 ${m.on ? "켜짐" : "꺼짐"}${lat}`);
+      } else if (m.event === "barge_in") {
+        addMsg("dev", `[barge-in] 판별: ${m.result}` + (m.text ? ` ("${m.text}")` : "") + (m.dur_ms ? ` (${m.dur_ms}ms)` : ""));
+      } else if (m.event === "interrupt") {
+        addMsg("dev", `[barge-in] 끊김: #${m.turn_id} (재생 ${m.played_ms}ms)`);
+      } else if (m.event === "intent") {
+        addMsg("dev", `[의도] ${m.intent} (등급: ${m.grade}, 규칙: ${m.rule}, ${m.classify_ms}ms)`);
+      } else if (m.event === "hint") {
+        addMsg("dev", `[감정/hint] 규칙: ${m.rule}` + (m.emotion ? ` (감정: ${m.emotion})` : ""));
+      }
+      break;
+    case "session_state":
+      addMsg("dev", `[세션] 상태: ${m.state}`);
+      break;
     case "backchannel_ignored": addMsg("alt", `맞장구로 보고 무시: ${m.text || "(소리)"}`); break;
     case "pong": if (typeof m.t === "number") $("rtt").textContent = `RTT ${Math.round(performance.now() - m.t)} ms`; break;
     case "stt_ready": $("stt").value = m.stt; $("err").textContent = ""; break;
@@ -309,10 +356,28 @@ function onMessage(ev) {
     case "audio_end": if (ctx) onEnd(m); break;
     case "interrupt": if (ctx) onInterrupt(m); break;
     case "turn_done":
-      if (m.interrupted && turnEls[m.turn_id]) turnEls[m.turn_id].classList.add("cut");
+      if (turnEls[m.turn_id]) {
+        if (m.interrupted) turnEls[m.turn_id].classList.add("cut");
+        if (m.spoken_text != null) {
+          let sp = turnEls[m.turn_id].querySelector(".spoken-text");
+          if (!sp) {
+            sp = document.createElement("div");
+            sp.className = "spoken-text";
+            turnEls[m.turn_id].appendChild(sp);
+          }
+          sp.textContent = `[들린 부분: "${m.spoken_text}"]`;
+        }
+      }
       setLatency(m.turn_id, m.trace); break;
     case "trace_update": setLatency(m.turn_id, m.trace); break;
-    case "reset_done": $("log").innerHTML = ""; $("lat").innerHTML = ""; break;
+    case "reset_done":
+      $("log").innerHTML = "";
+      $("lat").innerHTML = "";
+      for (const k in traces) delete traces[k];
+      for (const k in latRows) delete latRows[k];
+      for (const k in turnEls) delete turnEls[k];
+      updateLatSummary();
+      break;
     case "error": $("err").textContent = m.message; break;
   }
 }
@@ -324,7 +389,7 @@ function wsUrl() {
 }
 
 function connect() {
-  const mine = ws = new WebSocket(wsUrl());
+  const mine = ws = window.ws = new WebSocket(wsUrl());
   ws.binaryType = "arraybuffer";
   ws.onmessage = onMessage;
   ws.onopen = () => {
@@ -366,6 +431,19 @@ function connect() {
   };
 }
 
+window.sendPcm = async function(loudFrames, quietFrames) {
+  for (let i = 0; i < loudFrames; i++) {
+    const chunk = new Int16Array(320).fill(8000);
+    if (ws && ws.readyState === 1) ws.send(chunk.buffer);
+    await new Promise(r => setTimeout(r, 20));
+  }
+  for (let i = 0; i < quietFrames; i++) {
+    const chunk = new Int16Array(320).fill(0);
+    if (ws && ws.readyState === 1) ws.send(chunk.buffer);
+    await new Promise(r => setTimeout(r, 20));
+  }
+};
+
 function resetPlayback() {
   if (cur && !cur.dead) { killTurn(cur, 0, false); }
   cur = null; deadTurns.clear(); speakingLocal = false;
@@ -393,7 +471,7 @@ async function start() {
       let s = 0; for (let i = 0; i < pcm.length; i++) s += pcm[i] * pcm[i];
       const db = 20 * Math.log10(Math.sqrt(s / pcm.length) / 32768 + 1e-6);
       $("level").style.width = Math.max(0, Math.min(100, (db + 60) / 60 * 100)) + "%";
-      if (ws && ws.readyState === 1 && ws.bufferedAmount < 64000) ws.send(e.data);
+      if (!window.micMuted && ws && ws.readyState === 1 && ws.bufferedAmount < 64000) ws.send(e.data);
     };
   } catch (e) {
     $("err").textContent = "마이크를 쓸 수 없습니다(" + e.message + "). 텍스트 입력으로 시험하세요. localhost 또는 HTTPS 주소여야 합니다.";
