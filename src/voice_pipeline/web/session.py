@@ -26,11 +26,26 @@ from typing import Any, AsyncIterator
 
 from aiohttp import web
 
+from ..audio import Framer
 from ..bridge.ws_server_sink import WebSocketServerSink
 from ..llm.events import LLMClient, LLMEvent, Token
 from ..barge_filter import PROBE_WINDOW_MS, is_backchannel
 from ..chunker import SemanticChunker
 from ..pipeline import PendingTurn, VoicePipeline
+from ..prompts import (
+    PROMPT_CONFIRM_CAMERA,
+    PROMPT_CONFIRM_END,
+    PROMPT_CONFIRM_HIDE_AI,
+    PROMPT_CONFIRM_MODE,
+    PROMPT_CONFIRM_RESET,
+    PROMPT_GREETING_END,
+    PROMPT_GREETING_START,
+    PROMPT_NOTICE_AI,
+    PROMPT_REDO_EMPTY,
+    PROMPT_REDO_SUCCESS,
+    PROMPT_REPROMPT,
+    PromptBank,
+)
 from ..trace import (BACKCHANNEL, FIRST_CHUNK, LLM_FIRST_TOKEN, PLAYBACK_START, SPEECH_END, STT_FINAL,
                      TTS_FIRST_AUDIO, TURN_CONFIRMED, TurnTrace)
 from ..endpoint.turn import ConfirmedTurn, TurnEndpointer
@@ -38,6 +53,7 @@ from ..llm.hint import emotion_hint
 from ..tone import AUTO, CALM, extract_features, pick_tone
 from .devlog import DevLogger
 from .engines import Engines
+from .lifecycle import SessionLifecycle, SessionState
 
 log = logging.getLogger("voice_pipeline.web")
 
@@ -127,6 +143,9 @@ class DemoSession:
         self.voice_auto = False             # 목소리 선택이 auto 인가. 기본은 끔: 감정 맞춤은 LLM 어조 지시(hint)로 한다
         self.emotion_hint = bool(getattr(engines, "emotion_hint", True))
         self._speech_start_time: float | None = None
+        self.prompt_bank = getattr(engines, "prompt_bank", None) or PromptBank()
+        self.lifecycle = SessionLifecycle(initial_state=SessionState.IDLE, on_state_change=self._on_lifecycle_change)
+        self._notice_played: bool = False
 
     def _next_utt(self) -> int:
         self._utt_seq += 1
@@ -168,6 +187,68 @@ class DemoSession:
                          "voices": voices, "voice": voice,
                          "stt_options": self.engines.stt_options(), "stt": self.stt_id,
                          "endpoint": self.endpoint_mode, "endpoint_options": ENDPOINT_OPTIONS})
+
+    async def _on_lifecycle_change(self, old_state: str, new_state: str) -> None:
+        await self.send({"type": "session_state", "state": new_state})
+
+    async def play_prompt(self, key: str, *, voice: str | None = None, state: str = "speaking") -> int:
+        """PromptBank의 안내 음성을 즉시 재생한다."""
+        await self._stop_current()
+        turn_id = self.pipeline.guard.next_turn()
+        self.pipeline.traces[turn_id] = TurnTrace(turn_id)
+        selected_voice = voice or getattr(self.engines.tts, "voice", None)
+        pcm = self.prompt_bank.get_audio(key, selected_voice)
+        sample_rate = self.prompt_bank.sample_rate or getattr(self.engines.tts, "sample_rate", 24000)
+
+        await self.sink.avatar_state(state)
+        await self.sink.begin(turn_id, sample_rate)
+
+        if pcm:
+            framer = Framer(turn_id, sample_rate, self.pipeline.frame_ms)
+            for frame in framer.push(pcm):
+                if not self.pipeline.guard.is_live(turn_id):
+                    return turn_id
+                await self.sink.write(frame)
+            for frame in framer.flush():
+                if not self.pipeline.guard.is_live(turn_id):
+                    return turn_id
+                await self.sink.write(frame)
+            await self.sink.end(turn_id, framer.seq - 1)
+        else:
+            text = self.prompt_bank.get_text(key)
+            if text:
+                tts = self.engines.tts
+                framer = Framer(turn_id, tts.sample_rate, self.pipeline.frame_ms)
+                async for chunk in tts.stream(text):
+                    if not self.pipeline.guard.is_live(turn_id):
+                        return turn_id
+                    for frame in framer.push(chunk):
+                        await self.sink.write(frame)
+                for frame in framer.flush():
+                    await self.sink.write(frame)
+                await self.sink.end(turn_id, framer.seq - 1)
+
+        await self.sink.avatar_state("listening")
+        return turn_id
+
+    async def start_session(self, *, play_notice: bool = True) -> None:
+        """세션을 시작하고 필요 시 AI 법적 고지 음성을 재생한다."""
+        await self.lifecycle.start()
+        if play_notice and not self._notice_played:
+            self._notice_played = True
+            await self.play_prompt(PROMPT_NOTICE_AI)
+
+    async def end_session(self, *, play_greeting: bool = True) -> None:
+        """세션을 종료하고 기록을 삭제한 뒤 대기(idle) 상태로 복귀한다."""
+        await self._stop_current()
+        await self.lifecycle.transition_to(SessionState.CLOSING)
+        if play_greeting:
+            await self.play_prompt(PROMPT_GREETING_END)
+        self.pipeline.history.clear()
+        self._turn_tokens.clear()
+        self._barge_events.clear()
+        self._notice_played = False
+        await self.lifecycle.transition_to(SessionState.IDLE)
 
     async def _on_token(self, turn_id: int, text: str) -> None:
         self._turn_tokens[turn_id] = self._turn_tokens.get(turn_id, "") + text
@@ -299,9 +380,18 @@ class DemoSession:
         elif kind == "stop":
             await self._stop_current()
             await self.send({"type": "avatar_state", "state": "listening"})
+        elif kind in ("session_start", "start"):
+            play_notice = bool(msg.get("notice", True))
+            await self.start_session(play_notice=play_notice)
+        elif kind in ("session_end", "end"):
+            await self.end_session()
         elif kind == "reset":
             await self._stop_current()
             self.pipeline.history.clear()
+            self._turn_tokens.clear()
+            self._barge_events.clear()
+            self._notice_played = False
+            await self.lifecycle.reset()
             await self.send({"type": "reset_done"})
 
     # ---------- STT 선택 ----------
@@ -613,7 +703,10 @@ class DemoSession:
             await self.send({"type": "transcript", "utt_id": utt_id, "turn_id": turn_id,
                              "text": text, "stt": stt_id, "stt_ms": round(stt_ms, 1),
                              "emotion": emotion, "event": event, "tone": tone})
-            await self.send({"type": "session_state", "state": "active"})
+            if self.lifecycle.is_idle:
+                await self.lifecycle.start()
+            else:
+                await self.send({"type": "session_state", "state": self.lifecycle.state})
             t0_intent = time.monotonic()
             intent = "TALK"
             grade = "dialog"
@@ -663,7 +756,6 @@ class DemoSession:
                 interrupted = res.interrupted
                 spoken_text = res.spoken_text
                 turn_trace = {"stt_ms": round(stt_ms, 1), **self._trace_ms(res.trace)}
-            await self.send({"type": "session_state", "state": "idle"})
             await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": done_turn_id,
                              "interrupted": interrupted, "spoken_text": spoken_text,
                              "trace": turn_trace})

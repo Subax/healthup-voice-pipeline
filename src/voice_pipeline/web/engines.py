@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..backchannel import BackchannelBank
+from ..prompts import PromptBank
 from ..llm.events import LLMClient
 from ..stt.registry import STT_ENGINES
 from ..tts.base import TTSEngine
@@ -49,6 +50,7 @@ class Engines:
     default_mode: str = "demo"       # 세션 기본 화면 모드: demo | dev
     dev_log_dir: Path | None = None  # 개발 로그 저장 디렉터리 (None이면 logs/dev)
     dev_log_days: int = 7            # 개발 로그 보존 일수 (기본 7일)
+    prompt_bank: PromptBank | None = None  # 미리 합성한 안내 음성 묶음
     _stt_cache: dict[str, Any] = field(default_factory=dict)
     _stt_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
 
@@ -118,6 +120,10 @@ class Engines:
             if e is self.tts and self.backchannel is not None:
                 voices = [v["id"] for v in getattr(self.tts, "voices", None) or []] or [getattr(self.tts, "voice", None)]
                 await self.backchannel.prepare(self.tts, voices)  # 목소리 목록은 warmup 뒤에 채워진다
+            if e is self.tts and self.prompt_bank is not None:
+                # 기동 시 기본 목소리 1종만 선합성 (시간 단축)
+                default_voice = getattr(self.tts, "voice", None)
+                await self.prompt_bank.prepare(self.tts, [default_voice])
 
     async def close(self) -> None:
         fn = getattr(self.llm, "close", None)
@@ -137,8 +143,11 @@ def build_engines(llm: str = "mock", tts: str = "mock", stt: str = "mock", *,
                   first_min: int = 2, vad_silence_ms: int = 500, backchannel: bool = True,
                   endpoint: str = "smart", speculate: bool = True, barge_filter: bool = True,
                   emotion_hint: bool = True, default_mode: str = "demo",
-                  dev_log_dir: Path | None = None, dev_log_days: int = 7) -> Engines:
+                  dev_log_dir: Path | None = None, dev_log_days: int = 7,
+                  prompt_bank: PromptBank | None = None) -> Engines:
     labels = {"llm": llm, "tts": tts, "stt": stt}
+    if prompt_bank is None:
+        prompt_bank = PromptBank()
     if llm == "vllm":
         from ..llm.openai_stream import OpenAIStreamLLM
         llm_o = OpenAIStreamLLM()
@@ -162,7 +171,8 @@ def build_engines(llm: str = "mock", tts: str = "mock", stt: str = "mock", *,
     eng = Engines(llm_o, tts_o, stt_o, make_vad, labels, first_min, vad_silence_ms,
                   BackchannelBank() if backchannel else None, endpoint_default=endpoint,
                   speculate=speculate, barge_filter=barge_filter, emotion_hint=emotion_hint,
-                  default_mode=default_mode, dev_log_dir=dev_log_dir, dev_log_days=dev_log_days)
+                  default_mode=default_mode, dev_log_dir=dev_log_dir, dev_log_days=dev_log_days,
+                  prompt_bank=prompt_bank)
     if stt == "mock":
         from ..endpoint.smart_turn import MockEndpointScorer
         eng.endpoint_scorer = MockEndpointScorer(0.8)
