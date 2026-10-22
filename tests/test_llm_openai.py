@@ -9,9 +9,13 @@ from aiohttp import web
 
 from voice_pipeline.llm.events import Done, Meta, Token
 from voice_pipeline.llm.openai_stream import (
+    DEFAULT_MAX_TOKENS,
     DEFAULT_SYSTEM_PROMPT,
+    FIRST_PHASE_MAX_TOKENS,
+    MIN_SECOND_PHASE_MAX_TOKENS,
     PROMPT_NO_FILLER,
     OpenAIStreamLLM,
+    second_phase_max_tokens,
 )
 
 
@@ -128,6 +132,88 @@ def test_no_hint_keeps_system_prompt_unchanged():
     llm = OpenAIStreamLLM(base_url="http://x/v1")
     body = llm.build_body([{"role": "user", "content": "안녕하세요"}])
     assert body["messages"][0]["content"] == llm.system_prompt
+
+
+def test_continue_final_message_request_body():
+    """이어쓰기 요청(continue_final_message=True) 시 최상위 필드 검증."""
+    llm = OpenAIStreamLLM(base_url="http://x/v1")
+    msgs = [
+        {"role": "user", "content": "요즘 잠을 잘 못 자요."},
+        {"role": "assistant", "content": "많이 힘드셨겠어요."},
+    ]
+    body = llm.build_body(msgs, continue_final_message=True)
+    assert body["continue_final_message"] is True
+    assert body["add_generation_prompt"] is False
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_max_tokens_phase_split_and_calculation():
+    """1차(64) 및 2차(256 - 1차 토큰 수, 최소 192) max_tokens 분할 계산 검증."""
+    assert FIRST_PHASE_MAX_TOKENS == 64
+    assert DEFAULT_MAX_TOKENS == 256
+    assert MIN_SECOND_PHASE_MAX_TOKENS == 192
+
+    # 1차 토큰이 15개인 경우 256 - 15 = 241
+    assert second_phase_max_tokens(15) == 241
+    # 1차 토큰이 64개인 경우 256 - 64 = 192
+    assert second_phase_max_tokens(64) == 192
+    # 1차 토큰이 100개인 경우 최소값 192 유지
+    assert second_phase_max_tokens(100) == 192
+
+    llm = OpenAIStreamLLM(base_url="http://x/v1", max_tokens=256)
+    msgs = [{"role": "user", "content": "안녕"}]
+    # 1차 요청 본문
+    body1 = llm.build_body(msgs, max_tokens=FIRST_PHASE_MAX_TOKENS)
+    assert body1["max_tokens"] == 64
+    # 2차 요청 본문
+    body2 = llm.build_body(
+        msgs + [{"role": "assistant", "content": "답변 일부"}],
+        continue_final_message=True,
+        max_tokens=second_phase_max_tokens(20),
+    )
+    assert body2["max_tokens"] == 236
+    assert body2["continue_final_message"] is True
+    assert body2["add_generation_prompt"] is False
+
+
+async def test_stream_with_continuation_server_call():
+    """스트림 모드에서 이어쓰기 요청 시 서버로 전달되는 파라미터 및 이벤트 순서 확인."""
+    bodies = []
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        bodies.append(await request.json())
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        await resp.write(_chunk({"content": "잠이 안 오실 때는"}))
+        await resp.write(_chunk({}, finish="stop"))
+        await resp.write(b"data: [DONE]\n\n")
+        await resp.write_eof()
+        return resp
+
+    runner, url = await _start(handler)
+    llm = OpenAIStreamLLM(base_url=url, model="m")
+    try:
+        msgs = [
+            {"role": "user", "content": "잠을 못 자요."},
+            {"role": "assistant", "content": "많이 힘드셨겠어요."},
+        ]
+        events = [ev async for ev in llm.stream(
+            msgs, turn_id=2, continue_final_message=True, max_tokens=second_phase_max_tokens(10)
+        )]
+    finally:
+        await llm.close()
+        await runner.cleanup()
+
+    assert not any(isinstance(e, Meta) for e in events)  # 이어쓰기는 메타 생략
+    assert isinstance(events[-1], Done)
+    toks = [e for e in events if isinstance(e, Token)]
+    assert "".join(t.text for t in toks) == "잠이 안 오실 때는"
+
+    body = bodies[0]
+    assert body["max_tokens"] == 246
+    assert body["continue_final_message"] is True
+    assert body["add_generation_prompt"] is False
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
 
 
 def test_prompt_no_filler_constant_defined():

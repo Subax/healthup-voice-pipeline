@@ -52,6 +52,19 @@ PROMPT_NO_FILLER = (
     "사람이냐고 물으면 인공지능 도우미라고 솔직하게 말합니다."
 )
 
+DEFAULT_MAX_TOKENS = 256
+FIRST_PHASE_MAX_TOKENS = 64
+MIN_SECOND_PHASE_MAX_TOKENS = 192
+
+
+def second_phase_max_tokens(
+    first_phase_tokens: int,
+    total_tokens: int = DEFAULT_MAX_TOKENS,
+    min_tokens: int = MIN_SECOND_PHASE_MAX_TOKENS,
+) -> int:
+    """2차 요청 max_tokens: total(256) - 1차 토큰 수, 최소 192."""
+    return max(min_tokens, total_tokens - first_phase_tokens)
+
 INTERRUPTED_SUFFIX = " (사용자가 중간에 끊음)"
 _KEEP_KEYS = ("role", "content")
 HINT_KEY = "hint"   # 마지막 user 메시지에 달린 이번 턴 참고 (어조 지시 등). 시스템 프롬프트 뒤에 붙는다
@@ -115,24 +128,51 @@ class OpenAIStreamLLM:
         hint = turn_hint(messages)
         return f"{self.system_prompt} 이번 대답의 참고: {hint}" if hint else self.system_prompt
 
-    def build_body(self, messages: list[dict], stream: bool = True) -> dict[str, Any]:
+    def build_body(
+        self,
+        messages: list[dict],
+        stream: bool = True,
+        continue_final_message: bool = False,
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": "system", "content": self._system(messages)}, *clean_messages(messages)],
             "stream": stream,
-            "max_tokens": self.max_tokens,
+            "max_tokens": self.max_tokens if max_tokens is None else max_tokens,
             "temperature": self.temperature,
             # Qwen3.x 생각 모드 끄기: 지연에 결정적이다
             "chat_template_kwargs": {"enable_thinking": False},
         }
-        body.update(self.extra_body)
+        if continue_final_message:
+            body["continue_final_message"] = True
+            body["add_generation_prompt"] = False
+        if self.extra_body:
+            for k, v in self.extra_body.items():
+                if k == "chat_template_kwargs" and isinstance(v, dict):
+                    body["chat_template_kwargs"].update(v)
+                else:
+                    body[k] = v
         return body
 
-    async def stream(self, messages: list[dict], turn_id: int) -> AsyncIterator[LLMEvent]:
+    async def stream(
+        self,
+        messages: list[dict],
+        turn_id: int,
+        continue_final_message: bool = False,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[LLMEvent]:
         # 실제 모델은 위험도 메타를 만들지 않는다. §32 risk 필드는 상담 LLM 팀 서버에서 온다.
-        yield Meta(risk_grade="일반")
+        if not continue_final_message:
+            yield Meta(risk_grade="일반")
         sess = await self._sess()
-        async with sess.post(f"{self.base_url}/chat/completions", json=self.build_body(messages)) as resp:
+        body = self.build_body(
+            messages,
+            stream=True,
+            continue_final_message=continue_final_message,
+            max_tokens=max_tokens,
+        )
+        async with sess.post(f"{self.base_url}/chat/completions", json=body) as resp:
             if resp.status != 200:
                 raise RuntimeError(f"LLM HTTP {resp.status}: {(await resp.text())[:200]}")
             async for raw in resp.content:
