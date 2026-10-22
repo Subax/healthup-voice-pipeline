@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
@@ -10,6 +11,7 @@ from pathlib import Path
 
 from aiohttp import WSMsgType, web
 
+from .devlog import DEFAULT_DEV_LOG_DIR, daily_purge_loop, purge_old_logs
 from .engines import Engines
 from .session import DemoSession
 
@@ -73,11 +75,20 @@ def create_app(engines: Engines, *, warmup: bool = True, auth_token: str | None 
     if auth_token:
         app[AUTH_TOKEN] = auth_token
 
+    purge_task: asyncio.Task | None = None
+
     async def on_startup(app: web.Application) -> None:
+        nonlocal purge_task
+        base_dir = engines.dev_log_dir or DEFAULT_DEV_LOG_DIR
+        purge_old_logs(base_dir, engines.dev_log_days)
+        purge_task = asyncio.create_task(daily_purge_loop(base_dir, engines.dev_log_days))
         if warmup:
             await engines.warmup()
 
     async def on_cleanup(app: web.Application) -> None:
+        nonlocal purge_task
+        if purge_task is not None and not purge_task.done():
+            purge_task.cancel()
         await engines.close()
 
     app.on_startup.append(on_startup)

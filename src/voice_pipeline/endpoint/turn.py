@@ -91,6 +91,7 @@ class TurnEndpointer:
     def __init__(self, stt: Any, scorer: Any, emit: Callable[[dict], Awaitable[None]],
                  on_confirm: Callable[[ConfirmedTurn], Awaitable[None]], *,
                  stt_id: Any = "", mode: Any = "smart", log_dir: Path | None = None,
+                 session_mode: Any = None,
                  clock: Callable[[], float] = time.monotonic,
                  utt_id_factory: Callable[[], int] | None = None,
                  score_timeout_s: float = SCORE_TIMEOUT_S,
@@ -103,6 +104,7 @@ class TurnEndpointer:
         self._stt, self._scorer = stt, scorer
         self._emit_cb, self._on_confirm = emit, on_confirm
         self._stt_id, self._mode, self._log_dir = stt_id, mode, log_dir
+        self._session_mode = session_mode
         self._clock = clock
         self._seq_utt = 0
         self._utt_factory = utt_id_factory or self._default_utt
@@ -436,6 +438,10 @@ class TurnEndpointer:
 
     def _write_log(self, ev: dict) -> None:
         """평가 이벤트를 하루 단위 JSONL로 남긴다. 규칙 조정에 쓴다."""
+        if self._log_dir is None:
+            sm = _resolve(self._session_mode) if self._session_mode is not None else None
+            if sm != "dev":
+                return
         try:
             d = Path(self._log_dir) if self._log_dir is not None else DEFAULT_LOG_DIR
             d.mkdir(parents=True, exist_ok=True)

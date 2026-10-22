@@ -16,9 +16,11 @@ transcript와 turn_done에 둘 다 싣는다 (transcript의 turn_id는 곧 할�
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
@@ -34,6 +36,7 @@ from ..trace import (BACKCHANNEL, FIRST_CHUNK, LLM_FIRST_TOKEN, PLAYBACK_START, 
 from ..endpoint.turn import ConfirmedTurn, TurnEndpointer
 from ..llm.hint import emotion_hint
 from ..tone import AUTO, CALM, extract_features, pick_tone
+from .devlog import DevLogger
 from .engines import Engines
 
 log = logging.getLogger("voice_pipeline.web")
@@ -79,9 +82,15 @@ class _Spec:
 
 
 class DemoSession:
-    def __init__(self, ws: web.WebSocketResponse, engines: Engines):
+    def __init__(self, ws: web.WebSocketResponse, engines: Engines, session_id: str | None = None):
         self.engines = engines
         self.sink = WebSocketServerSink(ws)
+        self.session_id = session_id or uuid.uuid4().hex[:12]
+        self.dev_logger = DevLogger(base_dir=engines.dev_log_dir, retention_days=engines.dev_log_days)
+        self._turn_tokens: dict[int, str] = {}
+        self._barge_events: list[dict] = []
+        self._last_turn_eval_reason: str | None = None
+        self._last_face_summary: dict | None = None
         first_min = engines.first_min
         self.pipeline = VoicePipeline(TeeLLM(engines.llm, self._on_token), engines.tts, self.sink,
                                       chunker_factory=lambda: SemanticChunker(first_min=first_min))
@@ -98,6 +107,7 @@ class DemoSession:
         self.endpointer = TurnEndpointer(
             lambda: self._stt(), engines.endpoint_scorer, self._emit_turn_eval, self._on_turn_confirmed,
             stt_id=lambda: self.stt_id, mode=lambda: self.endpoint_mode, log_dir=engines.endpoint_log_dir,
+            session_mode=lambda: self.mode,
             utt_id_factory=self._next_utt,
             on_speculate=self._on_speculate if self.speculate else None,
             on_speculate_cancel=self._on_speculate_cancel if self.speculate else None)
@@ -127,6 +137,7 @@ class DemoSession:
         return self.engines.new_vad(PAUSE_SILENCE_MS if self.endpoint_mode == "smart" else None)
 
     async def _emit_turn_eval(self, ev: dict) -> None:
+        self._last_turn_eval_reason = ev.get("reason")
         await self.send(ev)
 
     def _voice_ids(self) -> set[str]:
@@ -159,6 +170,7 @@ class DemoSession:
                          "endpoint": self.endpoint_mode, "endpoint_options": ENDPOINT_OPTIONS})
 
     async def _on_token(self, turn_id: int, text: str) -> None:
+        self._turn_tokens[turn_id] = self._turn_tokens.get(turn_id, "") + text
         sp = self._spec
         if sp is not None and sp.held and sp.pt.turn_id == turn_id:  # 확정 전에는 UI로 보내지 않는다
             sp.deltas.append((turn_id, text))
@@ -389,13 +401,15 @@ class DemoSession:
     async def _duck(self, on: bool) -> None:
         now = time.monotonic()
         duck_lat = round((now - self._speech_start_time) * 1000.0, 1) if (on and self._speech_start_time is not None) else None
-        await self.send({"type": "duck", "on": on})
-        await self.send({
+        ev = {
             "type": "dev_event",
             "event": "duck",
             "on": on,
             "duck_latency_ms": duck_lat,
-        })
+        }
+        self._barge_events.append(ev)
+        await self.send({"type": "duck", "on": on})
+        await self.send(ev)
 
     async def _probe_begin(self) -> None:
         """말하는 중에 사용자 소리가 시작됐다. 소리를 낮추고, 짧은 맞장구인지 끝까지 본다.
@@ -419,12 +433,14 @@ class DemoSession:
         if self._probe is None or self._closed:
             return
         self._probe = None       # 길게 이어진다: 맞장구가 아니다. 이후 SpeechEnd는 보통 턴으로 처리된다
-        await self.send({
+        ev = {
             "type": "dev_event",
             "event": "barge_in",
             "result": "timeout_interrupt",
             "timeout_ms": PROBE_WINDOW_MS,
-        })
+        }
+        self._barge_events.append(ev)
+        await self.send(ev)
         await self._stop_current()
         await self._duck(False)
         if self.endpoint_mode == "smart":
@@ -452,21 +468,25 @@ class DemoSession:
             log.debug("맞장구 무시: %r %.0fms", text, dur_ms)
             await self._duck(False)
             await self.send({"type": "backchannel_ignored", "text": text})
-            await self.send({
+            ev = {
                 "type": "dev_event",
                 "event": "barge_in",
                 "result": "backchannel_ignored",
                 "text": text,
                 "dur_ms": round(dur_ms, 1),
-            })
+            }
+            self._barge_events.append(ev)
+            await self.send(ev)
             return
-        await self.send({
+        ev = {
             "type": "dev_event",
             "event": "barge_in",
             "result": "interrupt",
             "text": text,
             "dur_ms": round(dur_ms, 1),
-        })
+        }
+        self._barge_events.append(ev)
+        await self.send(ev)
         await self._stop_current()
         await self._duck(False)
         if self.endpoint_mode == "smart":
@@ -496,12 +516,14 @@ class DemoSession:
             actual_tid = dead or dead_tid
             if actual_tid:
                 actual_played = self.sink.played_ms(actual_tid) or played or 0.0
-                await self.send({
+                ev = {
                     "type": "dev_event",
                     "event": "interrupt",
                     "turn_id": actual_tid,
                     "played_ms": round(actual_played, 1),
-                })
+                }
+                self._barge_events.append(ev)
+                await self.send(ev)
         if running:
             await asyncio.wait({t})
 
@@ -625,17 +647,61 @@ class DemoSession:
                     log.debug("선행 결과 commit turn=%s", turn_id)
                     res = await spec.pt.commit()
                 if res is None:
-                    await self.send({"type": "session_state", "state": "idle"})
-                    await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": turn_id, "interrupted": True,
-                                     "spoken_text": "", "trace": {"stt_ms": round(stt_ms, 1), **self._trace_ms(trace)}})
-                    return
+                    done_turn_id = turn_id
+                    interrupted = True
+                    spoken_text = ""
+                    turn_trace = {"stt_ms": round(stt_ms, 1), **self._trace_ms(trace)}
+                else:
+                    done_turn_id = res.trace.turn_id
+                    interrupted = res.interrupted
+                    spoken_text = res.spoken_text
+                    turn_trace = {"stt_ms": round(stt_ms, 1), **self._trace_ms(res.trace)}
             else:
                 self._stage = "respond"
                 res = await self.pipeline.respond(text, trace=trace, opener=self._pick_opener(), hint=self._hint(emotion))
+                done_turn_id = res.trace.turn_id
+                interrupted = res.interrupted
+                spoken_text = res.spoken_text
+                turn_trace = {"stt_ms": round(stt_ms, 1), **self._trace_ms(res.trace)}
             await self.send({"type": "session_state", "state": "idle"})
-            await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": res.trace.turn_id,
-                             "interrupted": res.interrupted, "spoken_text": res.spoken_text,
-                             "trace": {"stt_ms": round(stt_ms, 1), **self._trace_ms(res.trace)}})
+            await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": done_turn_id,
+                             "interrupted": interrupted, "spoken_text": spoken_text,
+                             "trace": turn_trace})
+
+            llm_text = self._turn_tokens.pop(done_turn_id, "")
+            if not llm_text and spoken_text:
+                llm_text = spoken_text
+            barge_list = list(self._barge_events)
+            self._barge_events.clear()
+
+            dev_record = {
+                "ts": datetime.now().isoformat(timespec="milliseconds"),
+                "session_id": self.session_id,
+                "utt_id": utt_id,
+                "turn_id": done_turn_id,
+                "mode": self.mode,
+                "transcript": text,
+                "stt_id": stt_id,
+                "stt_ms": round(stt_ms, 1),
+                "emotion": emotion,
+                "event": event,
+                "face": self._last_face_summary,
+                "hint_rule": hint_rule,
+                "intent": {
+                    "intent": intent,
+                    "grade": grade,
+                    "rule": rule,
+                    "classify_ms": classify_ms,
+                },
+                "llm_text": llm_text,
+                "spoken_text": spoken_text,
+                "interrupted": interrupted,
+                "trace": turn_trace,
+                "turn_eval_reason": self._last_turn_eval_reason,
+                "barge": barge_list,
+            }
+            if self.mode == "dev":
+                self.dev_logger.write_turn(dev_record)
         except asyncio.CancelledError:
             raise
         except Exception as e:
