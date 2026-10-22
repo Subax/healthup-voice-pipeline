@@ -112,13 +112,41 @@ def _fast_ras_sampling(scores, decoded_tokens, sampling, top_p=0.8, top_k=25, wi
     return top
 
 
+class _ModelTimeProxy:
+    """cosyvoice.cli.model 전용 time 프록시.
+
+    전역 time.sleep 오염 없이 model.tts 내부의 time.sleep(0.1) 폴링 대기만
+    CV_POLL_MS(기본 10ms)로 단축한다.
+    취소 이벤트(_cur_cancel) 대기 후 즉시 반환하여 예외 없이 2437f38 정리 경로를 탄다.
+    """
+
+    def __init__(self, engine: Engine, orig_time: Any):
+        self._engine = engine
+        self._orig_time = orig_time
+
+    def sleep(self, s: float) -> None:
+        if abs(s - 0.1) < 1e-3:
+            poll_s = self._engine.poll_ms / 1000.0
+            self._engine._cur_cancel.wait(timeout=poll_s)
+            return
+        self._orig_time.sleep(s)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._orig_time, name)
+
+
 class Engine:
     def __init__(self, model_dir: str, fp16: bool = False):
+        import cosyvoice.cli.model as cv_model_mod
         from cosyvoice.cli.cosyvoice import AutoModel
+
+        self.poll_ms: float = float(os.environ.get("CV_POLL_MS", "10"))
+        cv_model_mod.time = _ModelTimeProxy(self, time)
 
         self.cv = AutoModel(model_dir=model_dir, fp16=fp16)
         self.sample_rate: int = self.cv.sample_rate
         self.model_dir = model_dir
+        self._prof: dict[str, Any] = {}
         self._job_lock = threading.Lock()
         self._active_llm_jobs: dict[str, threading.Event] = {}
         self._cur_cancel: threading.Event = threading.Event()
@@ -216,6 +244,11 @@ class Engine:
             if L + max_len_tok >= max_len:
                 yield from orig_wrapper(lm_input, sampling, min_len, max_len_tok, uuid)
                 return
+            t_start = time.monotonic()
+            n_tok = 0
+            t_first = None
+            prompt_token_pad = 3  # calm(KO_WAV_A): 10 hop + 3 pad + 3 pre_lookahead = 16
+            need_tok = self.cv.model.token_hop_len + getattr(self.cv.model.flow, "pre_lookahead_len", 3) + prompt_token_pad
             h = qwen(inputs_embeds=lm_input.to(dtype), past_key_values=cache,
                      cache_position=torch.arange(L, device=dev), use_cache=True).last_hidden_state
             logp = lm.llm_decoder(h[:, -1]).float().log_softmax(dim=-1)
@@ -226,12 +259,34 @@ class Engine:
                 top = lm.sampling_ids(logp.squeeze(0), out_tokens, sampling, ignore_eos=i < min_len)
                 if top in lm.stop_token_ids:
                     break
+                now = time.monotonic()
+                n_tok += 1
+                if t_first is None:
+                    t_first = now - t_start
+                    if self._prof and "t_tts_enter" in self._prof and "llm_first_tok_ms" not in self._prof:
+                        self._prof["llm_first_tok_ms"] = (now - self._prof["t_tts_enter"]) * 1000
+                if self._prof and n_tok >= need_tok and "t_hop1_ready" not in self._prof:
+                    self._prof["t_hop1_ready"] = now
+                    if "t_tts_enter" in self._prof:
+                        self._prof["hop1_ready_ms"] = (now - self._prof["t_tts_enter"]) * 1000
                 yield top
                 out_tokens.append(top)
                 x.copy_(lm.speech_embedding.weight[top].reshape(1, 1, -1).to(dtype))
                 pos.fill_(L + i)
                 g.replay()
                 logp = out
+
+            now_end = time.monotonic()
+            if self._prof:
+                if "t_hop1_ready" not in self._prof:
+                    self._prof["t_hop1_ready"] = now_end
+                    if "t_tts_enter" in self._prof:
+                        self._prof["hop1_ready_ms"] = (now_end - self._prof["t_tts_enter"]) * 1000
+            if os.environ.get("CV_PROF"):
+                total_ms = (now_end - t_start) * 1000
+                first_ms = (t_first or 0) * 1000
+                ms_per_tok = (total_ms - first_ms) / max(n_tok - 1, 1) if n_tok > 1 else 0.0
+                log.info("PROF llm tokens=%d total=%.0fms first=%.0fms (%.1fms/tok)", n_tok, total_ms, first_ms, ms_per_tok)
 
         lm.inference_wrapper = wrapper
 
@@ -266,6 +321,15 @@ class Engine:
         def cancel_aware_token2wav(*a, **kw):
             if self._cur_cancel.is_set():
                 raise _SynthCancelled()
+            if self._prof and "t_t2w_first" not in self._prof:
+                t_enter = time.monotonic()
+                self._prof["t_t2w_first"] = t_enter
+                t_hop = self._prof.get("t_hop1_ready", t_enter)
+                self._prof["poll_wait_ms"] = max(0.0, (t_enter - t_hop) * 1000)
+                self._prof["finalize"] = kw.get("finalize", False)
+                res = orig_token2wav(*a, **kw)
+                self._prof["token2wav_ms"] = (time.monotonic() - t_enter) * 1000
+                return res
             return orig_token2wav(*a, **kw)
 
         def cancel_aware_flow_inf(*a, **kw):
@@ -302,6 +366,8 @@ class Engine:
             cur_cancel = self._cur_cancel
             it = iter(orig(*a, **kw))
             n, tt, t_first = 0, 0.0, None
+            prompt_token_pad = 3  # calm(KO_WAV_A): 10 hop + 3 pad + 3 pre_lookahead = 16
+            need_tok = self.cv.model.token_hop_len + getattr(self.cv.model.flow, "pre_lookahead_len", 3) + prompt_token_pad
             while True:
                 t0 = time.monotonic()
                 try:
@@ -313,9 +379,20 @@ class Engine:
                 n += 1
                 if t_first is None:
                     t_first = dt
+                    if self._prof and "t_tts_enter" in self._prof and "llm_first_tok_ms" not in self._prof:
+                        self._prof["llm_first_tok_ms"] = (time.monotonic() - self._prof["t_tts_enter"]) * 1000
+                if self._prof and n >= need_tok and "t_hop1_ready" not in self._prof:
+                    self._prof["t_hop1_ready"] = time.monotonic()
+                    if "t_tts_enter" in self._prof:
+                        self._prof["hop1_ready_ms"] = (self._prof["t_hop1_ready"] - self._prof["t_tts_enter"]) * 1000
                 if cur_cancel.is_set():
                     break
                 yield tok
+            if self._prof:
+                if "t_hop1_ready" not in self._prof:
+                    self._prof["t_hop1_ready"] = time.monotonic()
+                    if "t_tts_enter" in self._prof:
+                        self._prof["hop1_ready_ms"] = (self._prof["t_hop1_ready"] - self._prof["t_tts_enter"]) * 1000
             if os.environ.get("CV_PROF"):
                 log.info("PROF llm tokens=%d total=%.0fms first=%.0fms (%.1fms/tok)", n, tt * 1000, (t_first or 0) * 1000, tt * 1000 / max(n, 1))
 
@@ -349,22 +426,26 @@ class Engine:
         cancel = cancel or threading.Event()
         self._cur_cancel = cancel
         self.cv.model.token_hop_len = self.hop0
+        if self._prof:
+            self._prof["t_synth"] = time.monotonic()
         preset = self.presets.get(voice or "", self.presets[DEFAULT_VOICE])
         if preset["mode"] == "cross_lingual":
             text = SYS + "<|endofprompt|>" + text
         # wetext 영어 정규화가 한글+숫자 문장에서 AssertionError 를 낸다 -> 프론트엔드 없이 재시도
         try:
-            self.cv.frontend.text_normalize(text, split=True, text_frontend=True)
-            frontend = True
+            segs = self.cv.frontend.text_normalize(text, split=True, text_frontend=True)
         except Exception:  # noqa: BLE001
             log.warning("text_frontend 실패, 정규화 없이 합성: %s", text)
-            frontend = False
-        segs = self.cv.frontend.text_normalize(text, split=True, text_frontend=frontend)
+            segs = self.cv.frontend.text_normalize(text, split=True, text_frontend=False)
         try:
             for seg in segs:
                 if cancel.is_set():
                     break
                 self.cv.model.token_hop_len = self.hop0
+                t_enter = time.monotonic()
+                if self._prof and "t_tts_enter" not in self._prof:
+                    self._prof["t_tts_enter"] = t_enter
+                    self._prof["frontend_ms"] = (t_enter - self._prof.get("t_synth", t_enter)) * 1000
                 gen = self.cv.model.tts(**self._model_input(preset, seg), stream=True, speed=1.0)
                 try:
                     for out in gen:
@@ -433,6 +514,7 @@ async def handle_tts(request: web.Request) -> web.StreamResponse:
         cancel_ev = threading.Event()
         q: asyncio.Queue = asyncio.Queue()
         t0 = time.monotonic()
+        eng._prof = {"t0": t0} if os.environ.get("CV_PROF") else {}
 
         def work() -> None:
             try:
@@ -464,8 +546,20 @@ async def handle_tts(request: web.Request) -> web.StreamResponse:
                 if isinstance(item, Exception):
                     break
                 if first:
-                    log.info("첫 청크 %.0fms", (time.monotonic() - t0) * 1000)
+                    first_chunk_ms = (time.monotonic() - t0) * 1000
+                    log.info("첫 청크 %.0fms", first_chunk_ms)
                     first = False
+                    if os.environ.get("CV_PROF"):
+                        f_ms = eng._prof.get("frontend_ms", 0.0)
+                        l1_ms = eng._prof.get("llm_first_tok_ms", 0.0)
+                        h1_ms = eng._prof.get("hop1_ready_ms", 0.0)
+                        pw_ms = eng._prof.get("poll_wait_ms", 0.0)
+                        t2w_ms = eng._prof.get("token2wav_ms", 0.0)
+                        fin = eng._prof.get("finalize", False)
+                        log.info(
+                            "PROF_BREAKDOWN frontend=%.1fms llm_first_tok=%.1fms hop1_ready=%.1fms poll_wait=%.1fms token2wav=%.1fms first_chunk=%.1fms finalize=%s",
+                            f_ms, l1_ms, h1_ms, pw_ms, t2w_ms, first_chunk_ms, fin,
+                        )
                 try:
                     await resp.write(item)
                 except (ConnectionResetError, aiohttp.ClientError):
