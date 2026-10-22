@@ -1,9 +1,9 @@
 # STATE — 모듈별 개발 현황
 
-> 결론: 웹 데모에서 마이크 → STT → 턴 종료 → LLM → TTS → 재생이 동작한다. 2026-10-21에 목표가 바뀌었다: 데모 마감 11/27, 태블릿 브라우저에서 지연 단축. Unreal·립싱크는 이번 범위가 아니다.
-> 지금 할 일: 사용자 입력 대기 — 태블릿 정보, 실제 발화 녹음, 청취 확인 (`docs/PLAN.md` §3).
+> 결론: 웹 데모에서 마이크 → STT → 턴 종료 → LLM → TTS → 재생이 동작한다. 2026-10-21에 목표가 바뀌었다: 데모 마감 11/27, 태블릿 브라우저에서 지연 단축. Unreal·립싱크는 이번 범위가 아니다. 이어서 2026-10-22에 **10/30 마감 웹 애플리케이션 완성 계획(`docs/plans/webapp_plan.md`: 화면 2모드·개별 기능 토글·개발 로그·음성 명령·세션 흐름)**이 시작되어 **A1(`3a7dbcd`)·A2(`73cfbbf`)가 완료**되었다.
+> 지금 할 일: 웹앱 계획 `B1`(개발 패널 확장) → `B2`(개발 로그 7일 보관) 구현 및 `next_04`(CosyVoice 첫 요청 TTFA 단축) 계측.
 >
-> - 기준: git `main` @ `d2805cd` (2026-10-21), 테스트 243개 통과 (`.venv/bin/python -m pytest`, 약 2분)
+> - 기준: git `main` @ `73cfbbf` (2026-10-23), 테스트 254개 통과 (`.venv/bin/python -m pytest`), `bench/web_ui_check.py` 10/10 통과
 > - 정리 방식: 모듈마다 「현재 상태」와 「연혁」(오래된 것이 위)을 둔다
 > - 세션별 기록은 `Claude/docs/STATE.md`에 있다. 이 문서는 그 기록과 git 이력을 모듈 기준으로 다시 묶은 것이다
 > - 수치는 개발 장비(AI TOP ATOM, GB10) 값이다. 최종 수치가 아니다
@@ -50,6 +50,7 @@
 
 ## 2. 청커 (`chunker.py`)
 | 2026-10-21 | `323ee0c` | 토큰 중간의 문장 끝에서도 자른다 (MTP가 토큰을 여러 글자씩 낸다). 첫 청크에 문장이 둘 들어가던 문제 수정. 벤치 첫 청크 P50 1139~1526 → 659ms |
+| 2026-10-22 | `db725dd` | 연결어미 쉼표(6~11자) 조기 절단(`next_01` 1a) |
 
 **현재 상태**: `SemanticChunker`가 LLM 출력을 문장 단위로 자른다. 첫 청크 최소 길이 `first_min`은 2다.
 
@@ -76,6 +77,7 @@
 ## 4. LLM (`llm/`)
 | 2026-10-21 | `584b3b3` | 시스템 프롬프트를 고령자 심리상담용으로 정리 (진단·약·치료 금지, 위기 시 109·119, AI임을 밝힘). 턴별 `hint` 지원 |
 | 2026-10-21 | `b910f9f` | `llm/hint.py`: 감정 태그 → 어조 지시. LLM 요청에만 들어가고 화면·로그에는 나가지 않는다 |
+| 2026-10-22 | `db725dd` | 필러 없는 프롬프트 옵션(`SYSTEM_PROMPT_KO_NO_FILLER`, `no_filler=True`: 첫 문장 공감 필러 없이 바로 핵심 답변 시작, "마음 건강 도우미" 호칭) 추가 (`next_01` 1a) |
 
 **현재 상태**: vLLM OpenAI 호환 스트리밍 클라이언트가 동작한다. 모델은 `nvidia/Qwen3.8-27B-NVFP4`, 생각 모드 끔, MTP 켬이다.
 
@@ -133,6 +135,7 @@
 
 ## 7. TTS (`tts/`, `services/cosyvoice/`)
 | 2026-10-21 | `2cc9044` | `CV_HOP` 기본 25 → 10. 단독 TTFA P50 787 → 507ms, 왕복 CER 같음. e2e 본문 첫 오디오 P50 2272 → 1798ms. 청취 확인은 하지 않았다 |
+| 2026-10-22 | `2437f38` | `next_03`: 요청별 `cancel_token`, `llm_job` 종료 이벤트 대기 뒤 `_gpu_lock` 해제, `finally` 사전 정리. 중단 후 재요청 잠금 대기 P50 1126~1704 → 83~214ms, 재요청 TTFA P50 1637~2222 → 572~708ms |
 
 **현재 상태**: CosyVoice3 서버(docker, 127.0.0.1:8091)와 `TTSEngine` 어댑터가 동작한다. 기본 목소리는 `calm`(한국어 여성 참조 + 중국어 지시문)이다.
 
@@ -205,8 +208,10 @@
 | 2026-10-21 | `b739529` | 태블릿 접속: TLS·토큰, 비루프백은 둘 다 필수, ws 압축 끔, 자동 재연결, RTT 표시, 접속 로그 끔 |
 | 2026-10-21 | `b910f9f` | `duck` 메시지(덕킹), `backchannel_ignored` 표시 |
 | 2026-10-21 | `d2805cd` | 끄개 `--no-speculate` `--no-barge-filter` `--no-emotion-hint` |
+| 2026-10-23 | `3a7dbcd` | `webapp` **A1 완료**: 서버 모드 상태(`demo`/`dev`), `--default-mode`(기본 `demo`), `hello.mode`, `config.mode` 전환 및 `mode_ready` 응답 (`tests/test_web_modes.py` 3개 통과) |
+| 2026-10-23 | `73cfbbf` | `webapp` **A2 완료**: 화면 2모드(자리표시 영역 터치 시작, `AI 마음 건강 도우미` 고지·카메라/마이크 대기 배지·연결 상태), 접이식 `⚙️ 설정` 패널(개별 토글 6종 `wake`·`face`·`show_ai_notice`·`show_camera_badge`·`show_conn_status`·`show_dev_info`), AI 고지 해제 시 법적 의무 경고 모달, `localStorage`·재연결 유지 (`bench/web_ui_check.py` 10/10 통과) |
 
-**현재 상태**: localhost에서 브라우저 마이크로 대화한다. 브라우저가 재생 주체다. `scripts/run_demo.sh` → http://localhost:8080/
+**현재 상태**: localhost에서 브라우저 마이크로 대화한다. 브라우저가 재생 주체다. 기본 모드는 `demo`(자리표시 화면 + 개별 설정 패널)이며 `dev` 모드 전환 시 전체 개발 패널이 열린다. `scripts/run_demo.sh` → http://localhost:8080/
 
 | 날짜 | 커밋 | 내용 |
 |---|---|---|
@@ -226,6 +231,8 @@
 | 2026-10-21 | `b739529` | `net_probe.py` (ws RTT·프레임 지터) |
 | 2026-10-21 | `2cc9044` | `hop_sweep.sh` (CV_HOP별 TTFA·CER·LLM 동시 첫 소리) |
 | 2026-10-21 | `d2805cd` | `web_e2e.py`가 `CHROME_PATH`를 받는다 |
+| 2026-10-22 | `2437f38` | `cosyvoice_cancel_lock_bench.py` (스트리밍 중단 직후 재요청 잠금 대기·TTFA·CER 측정) |
+| 2026-10-23 | `73cfbbf` | `web_ui_check.py` (Playwright 기반 데모/개발 모드·개별 기능 토글 6종·AI 고지 경고·재연결 유지 UI 검사 10개) |
 
 | 날짜 | 커밋 | 도구 |
 |---|---|---|

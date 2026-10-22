@@ -132,3 +132,45 @@
 3. **커밋 3 (선택 — `next_01` 1b 양보 실험·벤치 및 청취 샘플 도구)**:
    - `git stash pop`으로 복원한 `openai_stream.py`·`test_llm_openai.py`의 이어쓰기(`continue_final_message`, `max_tokens` 분할) 덩어리, `bench/first_audio_bench.py`, `bench/generate_listen_samples.py`, `bench/results/next_01_1b_yield*.txt`, `docs/plans/*.md`를 실험 기록 커밋으로 묶거나 사용자 지시에 따라 정리한다.
 
+---
+
+## 4. 1a·1b 정리 검토 (2026-10-22, `db725dd` 및 미커밋·비추적 파일)
+
+> 결론: (1) **`db725dd`(1a 커밋)는 문제 없다 (✅ 정상).** 덩어리 분리·기본값 불변·법적 고지 유지·단위 시험 모두 조건(§1-A, §3-C)을 충족했다. (2) 남은 파일들은 **폐기 1개(`next_04_draft.md`), 별도 실험·문서 커밋 1 묶음(1b 코드 3개 + 확정 문서 3개 + 결과 파일), 보류 2개(`next_04_first_tts.md`는 next_04 커밋 시 포함, `generate_listen_samples.py`는 실험 커밋 포함 또는 청취 후 폐기)**로 정리할 것을 제안한다.
+
+### 4-A. `git show db725dd` (1a 커밋) 검토 판정: ✅ 문제 없음
+
+| 점검 항목 | 확인 내용 (`db725dd`) | 판정 |
+|---|---|---|
+| 덩어리(hunk) 분리 | `src/voice_pipeline/chunker.py`, `tests/test_chunker.py`, `src/voice_pipeline/llm/openai_stream.py`의 `PROMPT_NO_FILLER` 상수, `tests/test_llm_openai.py`의 `test_prompt_no_filler_constant_defined`만 정확히 포함됨. 1b 이어쓰기 코드는 섞이지 않음 | ✅ |
+| 가져오기(import) 무결성 | 1b 심볼(`FIRST_PHASE_MAX_TOKENS` 등)을 참조하는 `bench/first_audio_bench.py`를 커밋에서 제외해 `db725dd` 단독 상태에서 깨지는 모듈이 없음 | ✅ |
+| 기본 동작 불변성 | `OpenAIStreamLLM` 기본 프롬프트는 `DEFAULT_SYSTEM_PROMPT` 그대로이고, `SemanticChunker(..., skip_filler_comma: bool = False)`도 기본값이 `False`여서 기존 파이프라인·데모 동작 불변 | ✅ |
+| 법적·의료 경계 보존 | `PROMPT_NO_FILLER` 하단에 비의료 고지, 자살예방상담전화(109)·응급(119) 안내, 인공지능 정체성 고지(`docs/LEGAL_REVIEW.md` §5)가 원문 그대로 유지됨 | ✅ |
+| 단위 시험 검증 | `tests/test_chunker.py` 4건(기본값 분할 유지, 군더더기 5종 건너뜀, 일반 쉼표 분할, `"아침에는,"` 등 군더더기 시작 일반 어절 분할) 및 `tests/test_llm_openai.py` 1건 통과 | ✅ |
+
+- 비고: 1a 옵션을 실제 데모(`pipeline.py`·`web/`) 기본값으로 승격하는 작업은 §1-A 원칙대로 추후 `web_e2e.py`(n=16) 검증과 함께 별도 커밋으로 진행하면 된다.
+
+### 4-B. 미커밋·비추적 파일 처리 제안 (별도 커밋 / 보류 / 폐기)
+
+| 구분 | 대상 파일 | 제안 판정 | 이유 및 처리 방안 |
+|---|---|---|---|
+| **미커밋 1b 변경 3개** | `src/voice_pipeline/llm/openai_stream.py`<br>`tests/test_llm_openai.py`<br>`bench/first_audio_bench.py` | **✅ 별도 커밋**<br>*(대안: `src/` 폐기 후 벤치 1a만 커밋)* | - **주제안(별도 커밋 권장)**: 1b 양보는 파이프라인에 채택하지 않기로 확정했으나(`next_02_draft.md` §5), `first_audio_bench.py`에 **합격한 1a 측정 모드(`--compare-prompt-chunker`, `--prompt`, `--chunker`)**와 `next_04`에서도 쓸 헬퍼(`get_latest_server_first_chunk`, `wait_vllm_idle`)가 함께 들어 있다. `openai_stream.py`의 `continue_final_message=False`·`max_tokens=None`은 기본 동작에 영향이 없고 `pytest` 251개를 통과하므로, 1a·1b 실측 재현성을 위해 `bench/results/next_01_1a_prompt_chunker.txt`·`next_01_1b_yield_v3.txt`(`git add -f`)와 묶어 **"1a·1b 벤치 및 양보 실험 기록(미채택)"**으로 별도 커밋하는 것이 가장 깔끔하다.<br>- **대안(`src/` 최소화 원할 시)**: 운영 모듈(`openai_stream.py`)에 미채택 함수(`second_phase_max_tokens` 등)를 남기지 않으려면 `openai_stream.py`·`test_llm_openai.py`의 미커밋 변경은 **폐기(`git checkout --`)**하고, `first_audio_bench.py`에서 1b(`--compare-yield`)만 덜어내어 1a 벤치만 커밋한다. |
+| **청취 샘플 생성기** | `bench/generate_listen_samples.py` | **⏸️ 보류**<br>*(또는 1b 실험 커밋에 포함)* | - 이미 `bench/results/listen_ab_yield/`에 5턴 비교 WAV 10개와 `README.txt` 생성이 끝나 있다.<br>- 위 1b 변경 3개를 별도 커밋할 경우 함께 커밋해도 되며, 대안(`src/` 1b 폐기)을 택할 경우 import 의존성이 깨지므로 비추적 상태로 **보류**했다가 사용자 청취 확인이 끝나면 **폐기(`rm`)**한다. |
+| **1a·1b 계획·검토 문서** | `docs/plans/next_01.md`<br>`docs/plans/next_01_review.md`<br>`docs/plans/next_02_draft.md` | **✅ 별도 커밋** | - `db725dd`(1a 커밋)의 설계·검토 근거와 1b 양보 불채택 결론(v3 재측정 포함)을 담은 의사결정 기록이므로 위 벤치·실험 기록 커밋에 함께 넣어 이력을 남긴다. |
+| **next_04 초안 문서** | `docs/plans/next_04_draft.md` | **🗑️ 폐기** | - 확정본인 `docs/plans/next_04_first_tts.md`(§8 자체 검토 포함)에 모든 내용이 상위 호환으로 반영되어 중복되므로 삭제(`rm docs/plans/next_04_draft.md`)한다. |
+| **next_04 확정 계획서** | `docs/plans/next_04_first_tts.md` | **⏸️ 보류**<br>*(next_04 커밋 시 포함)* | - 앞선 `2437f38` 커밋이 `next_03_cancel_lock.md`를 코드·벤치 결과와 함께 묶은 패턴과 동일하게, 곧 진행할 `next_04` 1·2단계 작업 완료 커밋에 함께 묶는다 (또는 지금 문서 커밋에 미리 넣어도 무방). |
+| **현재 검토 문서 수정분** | `docs/plans/next_03_review.md` (§3~§4) | **✅ 별도 커밋** | - `2437f38` 이후 추가된 §3(v3 diff 검토)·§4(1a·1b 정리 검토)를 위 실험·문서 정리 커밋에 함께 반영한다. |
+
+### 4-C. 권장 정리 순서 (사용자 승인 시 실행)
+
+1. **중복 초안 폐기**: `rm docs/plans/next_04_draft.md`
+2. **1a·1b 실험·벤치 및 문서 별도 커밋**:
+   ```bash
+   git add bench/first_audio_bench.py src/voice_pipeline/llm/openai_stream.py tests/test_llm_openai.py \
+           bench/generate_listen_samples.py \
+           docs/plans/next_01.md docs/plans/next_01_review.md docs/plans/next_02_draft.md docs/plans/next_03_review.md
+   git add -f bench/results/next_01_1a_prompt_chunker.txt bench/results/next_01_1b_yield_v3.txt
+   ```
+3. **`next_04` 착수**: 워킹 트리에 `docs/plans/next_04_first_tts.md`만 남긴 깨끗한 상태에서 `next_04` 1단계(`CV_PROF=1` 6단계 분해 측정)를 시작한다.
+
+
