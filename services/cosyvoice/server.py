@@ -20,7 +20,15 @@ import time
 
 import numpy as np
 import torch
+if torch.cuda.is_available():
+    torch.cuda.init()
+    _ = torch.cuda.Stream()
+import aiohttp
 from aiohttp import web
+
+class _SynthCancelled(Exception):
+    """합성 도중 클라이언트 취소로 중단됨."""
+    pass
 
 # 속도 스위치(환경변수, 기본값이 측정으로 고른 설정). GB10 에서 cuDNN 을 켜면 HiFT f0_predictor(float64 conv)가
 # "unable to find an engine" 으로 실패하고, 그 모듈만 끄고 켜도 전체가 더 느려서(RTF +50%) 기본은 끈다 (CV_CUDNN=1 로 켠다).
@@ -111,13 +119,16 @@ class Engine:
         self.cv = AutoModel(model_dir=model_dir, fp16=fp16)
         self.sample_rate: int = self.cv.sample_rate
         self.model_dir = model_dir
-        self.cancel = threading.Event()
+        self._job_lock = threading.Lock()
+        self._active_llm_jobs: dict[str, threading.Event] = {}
+        self._cur_cancel: threading.Event = threading.Event()
         # model.tts 는 스트리밍 중 token_hop_len 을 키우고 되돌리지 않는다 -> 요청마다 초기값으로 리셋
         # 첫 오디오까지 모으는 토큰 수. 25(공식 기본) → 10: 단독 TTFA P50 787 → 507ms, 왕복 CER 같음 (2026-10-21,
         # bench/hop_sweep.sh). 6은 TTFA가 더 줄지 않고 CER·RTF가 나빠졌다. 청취 확인은 하지 않았다
         self.cv.model.token_hop_len = int(os.environ.get("CV_HOP", "10"))
         self.hop0: int = self.cv.model.token_hop_len
         self._patch_llm()
+        self._patch_llm_job()
         if os.environ.get("CV_PROF"):
             m = self.cv.model
             o2w = m.token2wav
@@ -146,6 +157,7 @@ class Engine:
 
                 mod.inference = mk(o, name)
         self._patch_f0()
+        self._patch_cancel()
         if os.environ.get("CV_FASTSAMP", "1") == "1":
             self.cv.model.llm.sampling = _fast_ras_sampling
         if os.environ.get("CV_GRAPH", "1") == "1":
@@ -199,6 +211,7 @@ class Engine:
 
         @torch.inference_mode()
         def wrapper(lm_input, sampling, min_len, max_len_tok, uuid):
+            cur_cancel = self._cur_cancel
             L = lm_input.shape[1]
             if L + max_len_tok >= max_len:
                 yield from orig_wrapper(lm_input, sampling, min_len, max_len_tok, uuid)
@@ -208,6 +221,8 @@ class Engine:
             logp = lm.llm_decoder(h[:, -1]).float().log_softmax(dim=-1)
             out_tokens: list[int] = []
             for i in range(max_len_tok):
+                if cur_cancel.is_set():
+                    break
                 top = lm.sampling_ids(logp.squeeze(0), out_tokens, sampling, ignore_eos=i < min_len)
                 if top in lm.stop_token_ids:
                     break
@@ -219,6 +234,53 @@ class Engine:
                 logp = out
 
         lm.inference_wrapper = wrapper
+
+    @property
+    def cancel(self) -> threading.Event:
+        return self._cur_cancel
+
+    def _patch_llm_job(self) -> None:
+        """llm_job 스레드 생명주기를 추적하여 취소 뒤 정상 종료를 대기할 수 있게 한다."""
+        orig_llm_job = self.cv.model.llm_job
+
+        def wrapped_llm_job(*args, **kwargs):
+            uuid_val = kwargs.get("uuid") if "uuid" in kwargs else (args[4] if len(args) > 4 else id(threading.current_thread()))
+            done_ev = threading.Event()
+            with self._job_lock:
+                self._active_llm_jobs[str(uuid_val)] = done_ev
+            try:
+                return orig_llm_job(*args, **kwargs)
+            finally:
+                done_ev.set()
+                with self._job_lock:
+                    self._active_llm_jobs.pop(str(uuid_val), None)
+
+        self.cv.model.llm_job = wrapped_llm_job
+
+    def _patch_cancel(self) -> None:
+        """token2wav, flow.inference, hift.inference 가 cancel 플래그를 보게 감싸 취소 시 잔여 연산을 즉시 중단한다."""
+        orig_token2wav = self.cv.model.token2wav
+        orig_flow_inf = self.cv.model.flow.inference
+        orig_hift_inf = self.cv.model.hift.inference
+
+        def cancel_aware_token2wav(*a, **kw):
+            if self._cur_cancel.is_set():
+                raise _SynthCancelled()
+            return orig_token2wav(*a, **kw)
+
+        def cancel_aware_flow_inf(*a, **kw):
+            if self._cur_cancel.is_set():
+                raise _SynthCancelled()
+            return orig_flow_inf(*a, **kw)
+
+        def cancel_aware_hift_inf(*a, **kw):
+            if self._cur_cancel.is_set():
+                raise _SynthCancelled()
+            return orig_hift_inf(*a, **kw)
+
+        self.cv.model.token2wav = cancel_aware_token2wav
+        self.cv.model.flow.inference = cancel_aware_flow_inf
+        self.cv.model.hift.inference = cancel_aware_hift_inf
 
     def _patch_f0(self) -> None:
         """HiFT f0_predictor 는 float64 conv 를 쓰는데 GB10 cuDNN 에 fp64 엔진이 없다. 이 모듈만 cuDNN 을 끈다."""
@@ -237,6 +299,7 @@ class Engine:
         orig = llm.inference
 
         def wrapped(*a, **kw):
+            cur_cancel = self._cur_cancel
             it = iter(orig(*a, **kw))
             n, tt, t_first = 0, 0.0, None
             while True:
@@ -250,7 +313,7 @@ class Engine:
                 n += 1
                 if t_first is None:
                     t_first = dt
-                if self.cancel.is_set():
+                if cur_cancel.is_set():
                     break
                 yield tok
             if os.environ.get("CV_PROF"):
@@ -281,9 +344,10 @@ class Engine:
                 mi.pop(k, None)
         return mi
 
-    def synth(self, text: str, voice: str | None = None):
-        """PCM16 바이트 청크 제너레이터. 호출 전에 cancel 을 비운다."""
-        self.cancel.clear()
+    def synth(self, text: str, voice: str | None = None, cancel: threading.Event | None = None):
+        """PCM16 바이트 청크 제너레이터."""
+        cancel = cancel or threading.Event()
+        self._cur_cancel = cancel
         self.cv.model.token_hop_len = self.hop0
         preset = self.presets.get(voice or "", self.presets[DEFAULT_VOICE])
         if preset["mode"] == "cross_lingual":
@@ -296,19 +360,43 @@ class Engine:
             log.warning("text_frontend 실패, 정규화 없이 합성: %s", text)
             frontend = False
         segs = self.cv.frontend.text_normalize(text, split=True, text_frontend=frontend)
-        for seg in segs:
-            if self.cancel.is_set():
-                break
-            self.cv.model.token_hop_len = self.hop0
-            gen = self.cv.model.tts(**self._model_input(preset, seg), stream=True, speed=1.0)
-            try:
-                for out in gen:
-                    if self.cancel.is_set():
-                        break
-                    wav = out["tts_speech"].squeeze(0).numpy()
-                    yield (np.clip(wav, -1.0, 1.0) * 32767).astype("<i2").tobytes()
-            finally:
-                gen.close()
+        try:
+            for seg in segs:
+                if cancel.is_set():
+                    break
+                self.cv.model.token_hop_len = self.hop0
+                gen = self.cv.model.tts(**self._model_input(preset, seg), stream=True, speed=1.0)
+                try:
+                    for out in gen:
+                        if cancel.is_set():
+                            break
+                        wav = out["tts_speech"].squeeze(0).numpy()
+                        yield (np.clip(wav, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+                except _SynthCancelled:
+                    log.info("합성 취소 중단 (token2wav/flow/hift 차단)")
+                    break
+                finally:
+                    gen.close()
+        finally:
+            cancel.set()
+            # (2) llm_job 종료를 이벤트로 대기
+            with self._job_lock:
+                events = list(self._active_llm_jobs.values())
+            for ev in events:
+                if not ev.wait(timeout=1.0):
+                    log.warning("llm_job 종료 대기 타임아웃 (1.0s)")
+            # (3) 사전 정리는 서버가 직접 수행 (잔여 키 수 로깅)
+            with self.cv.model.lock:
+                rem_tok = len(self.cv.model.tts_speech_token_dict)
+                rem_end = len(self.cv.model.llm_end_dict)
+                rem_hift = len(self.cv.model.hift_cache_dict)
+                if rem_tok or rem_end or rem_hift:
+                    log.info("정리 전 잔여 키: tok=%d end=%d hift=%d", rem_tok, rem_end, rem_hift)
+                self.cv.model.tts_speech_token_dict.clear()
+                self.cv.model.llm_end_dict.clear()
+                self.cv.model.hift_cache_dict.clear()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
 
 
 async def handle_info(request: web.Request) -> web.Response:
@@ -340,12 +428,15 @@ async def handle_tts(request: web.Request) -> web.StreamResponse:
     resp = web.StreamResponse(headers={"Content-Type": "application/octet-stream"})
     await resp.prepare(request)
     async with request.app["lock"]:  # 한 번에 하나만 합성
+        if request.transport is None or request.transport.is_closing():
+            return resp
+        cancel_ev = threading.Event()
         q: asyncio.Queue = asyncio.Queue()
         t0 = time.monotonic()
 
         def work() -> None:
             try:
-                for pcm in eng.synth(text, voice):
+                for pcm in eng.synth(text, voice, cancel=cancel_ev):
                     loop.call_soon_threadsafe(q.put_nowait, pcm)
             except Exception as e:  # noqa: BLE001
                 log.exception("synth 실패")
@@ -357,19 +448,39 @@ async def handle_tts(request: web.Request) -> web.StreamResponse:
         th.start()
         first = True
         try:
-            while (item := await q.get()) is not None:
+            while True:
+                # 클라이언트 연결 끊김 즉시 감지 (is_closing)
+                if request.transport is None or request.transport.is_closing():
+                    log.info("취소 감지 (is_closing)")
+                    cancel_ev.set()
+                    break
+                try:
+                    item = await asyncio.wait_for(q.get(), timeout=0.04)
+                except asyncio.TimeoutError:
+                    continue
+
+                if item is None:
+                    break
                 if isinstance(item, Exception):
                     break
                 if first:
                     log.info("첫 청크 %.0fms", (time.monotonic() - t0) * 1000)
                     first = False
-                await resp.write(item)
-            await resp.write_eof()
-        except (ConnectionResetError, asyncio.CancelledError):
-            eng.cancel.set()  # 클라이언트가 끊었다
-            raise
+                try:
+                    await resp.write(item)
+                except (ConnectionResetError, aiohttp.ClientError):
+                    log.info("취소 감지 (write error)")
+                    cancel_ev.set()
+                    break
+            if not (request.transport is None or request.transport.is_closing()):
+                try:
+                    await resp.write_eof()
+                except Exception:
+                    pass
+        except (ConnectionResetError, asyncio.CancelledError, aiohttp.ClientError):
+            cancel_ev.set()
         finally:
-            eng.cancel.set()  # 정상 종료 시에도 남은 작업 정리
+            cancel_ev.set()  # 정상/비정상 종료 모두 남은 작업 정리
             await loop.run_in_executor(None, th.join)  # 다음 요청 전에 스레드 종료 보장
     return resp
 
