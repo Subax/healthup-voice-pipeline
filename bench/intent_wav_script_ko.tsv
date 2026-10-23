@@ -1,0 +1,217 @@
+# HealthUp 음성 명령 녹음 대본 (webapp_plan 작업 D1 — bench/intent_wav_script_ko.tsv)
+# - 녹음 환경: 조용한 방, 실제 데모 마이크 (16kHz mono PCM16 WAV 권장, 저장 경로: bench/results/intent_wav/)
+# - 열 형식 (5열 탭 구분, bench/intent_eval.py 하위 호환):
+#     <발화 문장><TAB><정답 의도><TAB><권장 WAV 파일명><TAB><반복 회차><TAB><세션 상태>
+# - 구성 요약 (총 데이터 200줄):
+#   * [1] 기본 명령 10종 × 표현 5개 × 2회(r1, r2) = 100개 (001~100)  <-- 핵심 기본 세트 (비명령 20 + 위기 10 합산 시 130개)
+#   * [2] 개별 기능 on/off 명령 7종 × 표현 5개 × 2회(r1, r2) = 70개 (101~170) <-- §3.1 확장 토글 세트
+#   * [3] 비명령 일상·상담 대화문 (CHAT) 20문장 × 1회 = 20개 (171~190)
+#   * [4] 위기 흉내 표현 (CRISIS, 시연자 연기) 10문장 × 1회 = 10개 (191~200)
+# - D1 합격 기준 (webapp_plan.md §5 D1):
+#   * SenseVoice STT 기준 명령 재현율 >= 90%
+#   * 되돌릴 수 없는 명령 / 법적 경고 명령 오실행 = 0건
+#   * 위기 흉내 표현 10문장 중 명령 판정 = 0건
+# --- [1] 기본 명령 10종 × 표현 5개 × 2회 = 100개 (001~100) ---
+시작하자	SESSION_START	001_SESSION_START_1_r1.wav	1	idle
+시작하자	SESSION_START	002_SESSION_START_1_r2.wav	2	idle
+안녕하세요	SESSION_START	003_SESSION_START_2_r1.wav	1	idle
+안녕하세요	SESSION_START	004_SESSION_START_2_r2.wav	2	idle
+이야기하고 싶어요	SESSION_START	005_SESSION_START_3_r1.wav	1	idle
+이야기하고 싶어요	SESSION_START	006_SESSION_START_3_r2.wav	2	idle
+대화 시작해 줘	SESSION_START	007_SESSION_START_4_r1.wav	1	idle
+대화 시작해 줘	SESSION_START	008_SESSION_START_4_r2.wav	2	idle
+말동무 해 주세요	SESSION_START	009_SESSION_START_5_r1.wav	1	idle
+말동무 해 주세요	SESSION_START	010_SESSION_START_5_r2.wav	2	idle
+잠깐만	STOP_SPEAKING	011_STOP_SPEAKING_1_r1.wav	1	speaking
+잠깐만	STOP_SPEAKING	012_STOP_SPEAKING_1_r2.wav	2	speaking
+멈춰	STOP_SPEAKING	013_STOP_SPEAKING_2_r1.wav	1	speaking
+멈춰	STOP_SPEAKING	014_STOP_SPEAKING_2_r2.wav	2	speaking
+그만	STOP_SPEAKING	015_STOP_SPEAKING_3_r1.wav	1	speaking
+그만	STOP_SPEAKING	016_STOP_SPEAKING_3_r2.wav	2	speaking
+그만 말해 줘	STOP_SPEAKING	017_STOP_SPEAKING_4_r1.wav	1	speaking
+그만 말해 줘	STOP_SPEAKING	018_STOP_SPEAKING_4_r2.wav	2	speaking
+말 좀 멈춰 주세요	STOP_SPEAKING	019_STOP_SPEAKING_5_r1.wav	1	speaking
+말 좀 멈춰 주세요	STOP_SPEAKING	020_STOP_SPEAKING_5_r2.wav	2	speaking
+다시 말해 줘	REPEAT_BOT	021_REPEAT_BOT_1_r1.wav	1	active
+다시 말해 줘	REPEAT_BOT	022_REPEAT_BOT_1_r2.wav	2	active
+뭐라고요?	REPEAT_BOT	023_REPEAT_BOT_2_r1.wav	1	active
+뭐라고요?	REPEAT_BOT	024_REPEAT_BOT_2_r2.wav	2	active
+못 들었어요	REPEAT_BOT	025_REPEAT_BOT_3_r1.wav	1	active
+못 들었어요	REPEAT_BOT	026_REPEAT_BOT_3_r2.wav	2	active
+방금 한 말 다시 해 주세요	REPEAT_BOT	027_REPEAT_BOT_4_r1.wav	1	active
+방금 한 말 다시 해 주세요	REPEAT_BOT	028_REPEAT_BOT_4_r2.wav	2	active
+한 번만 더 말해 주세요	REPEAT_BOT	029_REPEAT_BOT_5_r1.wav	1	active
+한 번만 더 말해 주세요	REPEAT_BOT	030_REPEAT_BOT_5_r2.wav	2	active
+다시 말할게요	REDO_USER	031_REDO_USER_1_r1.wav	1	active
+다시 말할게요	REDO_USER	032_REDO_USER_1_r2.wav	2	active
+방금 거 취소	REDO_USER	033_REDO_USER_2_r1.wav	1	active
+방금 거 취소	REDO_USER	034_REDO_USER_2_r2.wav	2	active
+방금 한 말 취소해 줘	REDO_USER	035_REDO_USER_3_r1.wav	1	active
+방금 한 말 취소해 줘	REDO_USER	036_REDO_USER_3_r2.wav	2	active
+내가 잘못 말했어 다시 할게요	REDO_USER	037_REDO_USER_4_r1.wav	1	active
+내가 잘못 말했어 다시 할게요	REDO_USER	038_REDO_USER_4_r2.wav	2	active
+방금 말은 지워 주세요	REDO_USER	039_REDO_USER_5_r1.wav	1	active
+방금 말은 지워 주세요	REDO_USER	040_REDO_USER_5_r2.wav	2	active
+처음부터 다시	RESET	041_RESET_1_r1.wav	1	active
+처음부터 다시	RESET	042_RESET_1_r2.wav	2	active
+다른 사람이에요	RESET	043_RESET_2_r1.wav	1	active
+다른 사람이에요	RESET	044_RESET_2_r2.wav	2	active
+처음부터 다시 시작하자	RESET	045_RESET_3_r1.wav	1	active
+처음부터 다시 시작하자	RESET	046_RESET_3_r2.wav	2	active
+사람이 바뀌었어요	RESET	047_RESET_4_r1.wav	1	active
+사람이 바뀌었어요	RESET	048_RESET_4_r2.wav	2	active
+초기화해 주세요	RESET	049_RESET_5_r1.wav	1	active
+초기화해 주세요	RESET	050_RESET_5_r2.wav	2	active
+그만할게요	SESSION_END	051_SESSION_END_1_r1.wav	1	active
+그만할게요	SESSION_END	052_SESSION_END_1_r2.wav	2	active
+이제 끝내자	SESSION_END	053_SESSION_END_2_r1.wav	1	active
+이제 끝내자	SESSION_END	054_SESSION_END_2_r2.wav	2	active
+대화 끝낼게요	SESSION_END	055_SESSION_END_3_r1.wav	1	active
+대화 끝낼게요	SESSION_END	056_SESSION_END_3_r2.wav	2	active
+이만 종료할게요	SESSION_END	057_SESSION_END_4_r1.wav	1	active
+이만 종료할게요	SESSION_END	058_SESSION_END_4_r2.wav	2	active
+오늘 대화는 여기까지 할게요	SESSION_END	059_SESSION_END_5_r1.wav	1	active
+오늘 대화는 여기까지 할게요	SESSION_END	060_SESSION_END_5_r2.wav	2	active
+개발 모드로 바꿔	MODE_DEV	061_MODE_DEV_1_r1.wav	1	active
+개발 모드로 바꿔	MODE_DEV	062_MODE_DEV_1_r2.wav	2	active
+개발 모드	MODE_DEV	063_MODE_DEV_2_r1.wav	1	active
+개발 모드	MODE_DEV	064_MODE_DEV_2_r2.wav	2	active
+개발 모드로 전환해 줘	MODE_DEV	065_MODE_DEV_3_r1.wav	1	active
+개발 모드로 전환해 줘	MODE_DEV	066_MODE_DEV_3_r2.wav	2	active
+개발자 모드 켜 줘	MODE_DEV	067_MODE_DEV_4_r1.wav	1	active
+개발자 모드 켜 줘	MODE_DEV	068_MODE_DEV_4_r2.wav	2	active
+개발 화면으로 바꿔 주세요	MODE_DEV	069_MODE_DEV_5_r1.wav	1	active
+개발 화면으로 바꿔 주세요	MODE_DEV	070_MODE_DEV_5_r2.wav	2	active
+데모 모드	MODE_DEMO	071_MODE_DEMO_1_r1.wav	1	active
+데모 모드	MODE_DEMO	072_MODE_DEMO_1_r2.wav	2	active
+데모 모드로 바꿔	MODE_DEMO	073_MODE_DEMO_2_r1.wav	1	active
+데모 모드로 바꿔	MODE_DEMO	074_MODE_DEMO_2_r2.wav	2	active
+데모 모드로 전환해 줘	MODE_DEMO	075_MODE_DEMO_3_r1.wav	1	active
+데모 모드로 전환해 줘	MODE_DEMO	076_MODE_DEMO_3_r2.wav	2	active
+시연 모드로 바꿔 줘	MODE_DEMO	077_MODE_DEMO_4_r1.wav	1	active
+시연 모드로 바꿔 줘	MODE_DEMO	078_MODE_DEMO_4_r2.wav	2	active
+데모 화면 보여 줘	MODE_DEMO	079_MODE_DEMO_5_r1.wav	1	active
+데모 화면 보여 줘	MODE_DEMO	080_MODE_DEMO_5_r2.wav	2	active
+네	CONFIRM_YES	081_CONFIRM_YES_1_r1.wav	1	confirming
+네	CONFIRM_YES	082_CONFIRM_YES_1_r2.wav	2	confirming
+응	CONFIRM_YES	083_CONFIRM_YES_2_r1.wav	1	confirming
+응	CONFIRM_YES	084_CONFIRM_YES_2_r2.wav	2	confirming
+그래요	CONFIRM_YES	085_CONFIRM_YES_3_r1.wav	1	confirming
+그래요	CONFIRM_YES	086_CONFIRM_YES_3_r2.wav	2	confirming
+맞아요	CONFIRM_YES	087_CONFIRM_YES_4_r1.wav	1	confirming
+맞아요	CONFIRM_YES	088_CONFIRM_YES_4_r2.wav	2	confirming
+그렇게 해 주세요	CONFIRM_YES	089_CONFIRM_YES_5_r1.wav	1	confirming
+그렇게 해 주세요	CONFIRM_YES	090_CONFIRM_YES_5_r2.wav	2	confirming
+아니요	CONFIRM_NO	091_CONFIRM_NO_1_r1.wav	1	confirming
+아니요	CONFIRM_NO	092_CONFIRM_NO_1_r2.wav	2	confirming
+아니	CONFIRM_NO	093_CONFIRM_NO_2_r1.wav	1	confirming
+아니	CONFIRM_NO	094_CONFIRM_NO_2_r2.wav	2	confirming
+취소할래요	CONFIRM_NO	095_CONFIRM_NO_3_r1.wav	1	confirming
+취소할래요	CONFIRM_NO	096_CONFIRM_NO_3_r2.wav	2	confirming
+안 할래요	CONFIRM_NO	097_CONFIRM_NO_4_r1.wav	1	confirming
+안 할래요	CONFIRM_NO	098_CONFIRM_NO_4_r2.wav	2	confirming
+아니요 취소해 주세요	CONFIRM_NO	099_CONFIRM_NO_5_r1.wav	1	confirming
+아니요 취소해 주세요	CONFIRM_NO	100_CONFIRM_NO_5_r2.wav	2	confirming
+# --- [2] 개별 기능 on/off 명령 7종 × 표현 5개 × 2회 = 70개 (101~170) ---
+카메라 켜 줘	CAMERA_ON	101_CAMERA_ON_1_r1.wav	1	active
+카메라 켜 줘	CAMERA_ON	102_CAMERA_ON_1_r2.wav	2	active
+표정 인식 켜 줘	CAMERA_ON	103_CAMERA_ON_2_r1.wav	1	active
+표정 인식 켜 줘	CAMERA_ON	104_CAMERA_ON_2_r2.wav	2	active
+카메라 켜 주세요	CAMERA_ON	105_CAMERA_ON_3_r1.wav	1	active
+카메라 켜 주세요	CAMERA_ON	106_CAMERA_ON_3_r2.wav	2	active
+얼굴 감정 켜 줘	CAMERA_ON	107_CAMERA_ON_4_r1.wav	1	active
+얼굴 감정 켜 줘	CAMERA_ON	108_CAMERA_ON_4_r2.wav	2	active
+표정 분석 켜 주세요	CAMERA_ON	109_CAMERA_ON_5_r1.wav	1	active
+표정 분석 켜 주세요	CAMERA_ON	110_CAMERA_ON_5_r2.wav	2	active
+카메라 꺼 줘	CAMERA_OFF	111_CAMERA_OFF_1_r1.wav	1	active
+카메라 꺼 줘	CAMERA_OFF	112_CAMERA_OFF_1_r2.wav	2	active
+표정 인식 꺼 줘	CAMERA_OFF	113_CAMERA_OFF_2_r1.wav	1	active
+표정 인식 꺼 줘	CAMERA_OFF	114_CAMERA_OFF_2_r2.wav	2	active
+카메라 꺼 주세요	CAMERA_OFF	115_CAMERA_OFF_3_r1.wav	1	active
+카메라 꺼 주세요	CAMERA_OFF	116_CAMERA_OFF_3_r2.wav	2	active
+얼굴 감정 꺼 줘	CAMERA_OFF	117_CAMERA_OFF_4_r1.wav	1	active
+얼굴 감정 꺼 줘	CAMERA_OFF	118_CAMERA_OFF_4_r2.wav	2	active
+카메라 중지해 줘	CAMERA_OFF	119_CAMERA_OFF_5_r1.wav	1	active
+카메라 중지해 줘	CAMERA_OFF	120_CAMERA_OFF_5_r2.wav	2	active
+음성 시작 켜 줘	WAKE_ON	121_WAKE_ON_1_r1.wav	1	active
+음성 시작 켜 줘	WAKE_ON	122_WAKE_ON_1_r2.wav	2	active
+대기 청취 켜 줘	WAKE_ON	123_WAKE_ON_2_r1.wav	1	active
+대기 청취 켜 줘	WAKE_ON	124_WAKE_ON_2_r2.wav	2	active
+음성으로 시작 켜 주세요	WAKE_ON	125_WAKE_ON_3_r1.wav	1	active
+음성으로 시작 켜 주세요	WAKE_ON	126_WAKE_ON_3_r2.wav	2	active
+대기 마이크 켜 줘	WAKE_ON	127_WAKE_ON_4_r1.wav	1	active
+대기 마이크 켜 줘	WAKE_ON	128_WAKE_ON_4_r2.wav	2	active
+대기 청취 활성화해 줘	WAKE_ON	129_WAKE_ON_5_r1.wav	1	active
+대기 청취 활성화해 줘	WAKE_ON	130_WAKE_ON_5_r2.wav	2	active
+음성 시작 꺼 줘	WAKE_OFF	131_WAKE_OFF_1_r1.wav	1	active
+음성 시작 꺼 줘	WAKE_OFF	132_WAKE_OFF_1_r2.wav	2	active
+대기 청취 꺼 줘	WAKE_OFF	133_WAKE_OFF_2_r1.wav	1	active
+대기 청취 꺼 줘	WAKE_OFF	134_WAKE_OFF_2_r2.wav	2	active
+음성으로 시작 꺼 주세요	WAKE_OFF	135_WAKE_OFF_3_r1.wav	1	active
+음성으로 시작 꺼 주세요	WAKE_OFF	136_WAKE_OFF_3_r2.wav	2	active
+대기 마이크 꺼 줘	WAKE_OFF	137_WAKE_OFF_4_r1.wav	1	active
+대기 마이크 꺼 줘	WAKE_OFF	138_WAKE_OFF_4_r2.wav	2	active
+대기 청취 비활성화해 줘	WAKE_OFF	139_WAKE_OFF_5_r1.wav	1	active
+대기 청취 비활성화해 줘	WAKE_OFF	140_WAKE_OFF_5_r2.wav	2	active
+개발 정보 보여 줘	DEV_INFO_ON	141_DEV_INFO_ON_1_r1.wav	1	active
+개발 정보 보여 줘	DEV_INFO_ON	142_DEV_INFO_ON_1_r2.wav	2	active
+지연 표 보여 줘	DEV_INFO_ON	143_DEV_INFO_ON_2_r1.wav	1	active
+지연 표 보여 줘	DEV_INFO_ON	144_DEV_INFO_ON_2_r2.wav	2	active
+개발 패널 보여 주세요	DEV_INFO_ON	145_DEV_INFO_ON_3_r1.wav	1	active
+개발 패널 보여 주세요	DEV_INFO_ON	146_DEV_INFO_ON_3_r2.wav	2	active
+개발 정보 켜 줘	DEV_INFO_ON	147_DEV_INFO_ON_4_r1.wav	1	active
+개발 정보 켜 줘	DEV_INFO_ON	148_DEV_INFO_ON_4_r2.wav	2	active
+지연 시간 표 보여 줘	DEV_INFO_ON	149_DEV_INFO_ON_5_r1.wav	1	active
+지연 시간 표 보여 줘	DEV_INFO_ON	150_DEV_INFO_ON_5_r2.wav	2	active
+개발 정보 숨겨 줘	DEV_INFO_OFF	151_DEV_INFO_OFF_1_r1.wav	1	active
+개발 정보 숨겨 줘	DEV_INFO_OFF	152_DEV_INFO_OFF_1_r2.wav	2	active
+지연 표 숨겨 줘	DEV_INFO_OFF	153_DEV_INFO_OFF_2_r1.wav	1	active
+지연 표 숨겨 줘	DEV_INFO_OFF	154_DEV_INFO_OFF_2_r2.wav	2	active
+개발 패널 숨겨 주세요	DEV_INFO_OFF	155_DEV_INFO_OFF_3_r1.wav	1	active
+개발 패널 숨겨 주세요	DEV_INFO_OFF	156_DEV_INFO_OFF_3_r2.wav	2	active
+개발 정보 꺼 줘	DEV_INFO_OFF	157_DEV_INFO_OFF_4_r1.wav	1	active
+개발 정보 꺼 줘	DEV_INFO_OFF	158_DEV_INFO_OFF_4_r2.wav	2	active
+지연 시간 표 숨겨 줘	DEV_INFO_OFF	159_DEV_INFO_OFF_5_r1.wav	1	active
+지연 시간 표 숨겨 줘	DEV_INFO_OFF	160_DEV_INFO_OFF_5_r2.wav	2	active
+카메라 표시 숨겨 줘	UI_BADGE_TOGGLE	161_UI_BADGE_TOGGLE_1_r1.wav	1	active
+카메라 표시 숨겨 줘	UI_BADGE_TOGGLE	162_UI_BADGE_TOGGLE_1_r2.wav	2	active
+카메라 배지 켜 줘	UI_BADGE_TOGGLE	163_UI_BADGE_TOGGLE_2_r1.wav	1	active
+카메라 배지 켜 줘	UI_BADGE_TOGGLE	164_UI_BADGE_TOGGLE_2_r2.wav	2	active
+연결 상태 숨겨 줘	UI_BADGE_TOGGLE	165_UI_BADGE_TOGGLE_3_r1.wav	1	active
+연결 상태 숨겨 줘	UI_BADGE_TOGGLE	166_UI_BADGE_TOGGLE_3_r2.wav	2	active
+AI 고지 숨겨 줘	UI_BADGE_TOGGLE	167_UI_BADGE_TOGGLE_4_r1.wav	1	active
+AI 고지 숨겨 줘	UI_BADGE_TOGGLE	168_UI_BADGE_TOGGLE_4_r2.wav	2	active
+에이아이 고지 보여 주세요	UI_BADGE_TOGGLE	169_UI_BADGE_TOGGLE_5_r1.wav	1	active
+에이아이 고지 보여 주세요	UI_BADGE_TOGGLE	170_UI_BADGE_TOGGLE_5_r2.wav	2	active
+# --- [3] 비명령 일상·상담 대화문 20문장 (CHAT — 171~190) ---
+그만 좀 하라고 했는데 아들이 계속 잔소리를 해요	CHAT	171_CHAT_01.wav	1	active
+운동을 처음부터 다시 시작하려니까 무릎이 시큰거려요	CHAT	172_CHAT_02.wav	1	active
+어제 손주가 카메라로 사진을 찍어 줬는데 참 잘 나왔어요	CHAT	173_CHAT_03.wav	1	active
+잠깐만 걸어도 숨이 차고 다리가 후들거려요	CHAT	174_CHAT_04.wav	1	active
+남편이 먼저 떠나고 나니까 집안이 너무 적막해요	CHAT	175_CHAT_05.wav	1	active
+밤에 자다가 화장실 가려고 깨면 다시 잠들기가 힘들어요	CHAT	176_CHAT_06.wav	1	active
+병원에서 혈압약을 바꿔 줬는데 속이 좀 쓰린 것 같아요	CHAT	177_CHAT_07.wav	1	active
+오늘 아침에는 미역국에 밥을 반 공기만 말아 먹었어요	CHAT	178_CHAT_08.wav	1	active
+네 시쯤에 경로당에 갔다가 친구들이랑 화투 치고 왔어요	CHAT	179_CHAT_09.wav	1	active
+아니요라고 말하고 싶었는데 며느리 눈치가 보여서 그냥 참았어요	CHAT	180_CHAT_10.wav	1	active
+날씨가 추워지니까 허리랑 어깨가 더 쑤시는 것 같아요	CHAT	181_CHAT_11.wav	1	active
+텔레비전을 켜 놔도 재미있는 게 하나도 없어요	CHAT	182_CHAT_12.wav	1	active
+귀가 점점 어두워져서 남들이 하는 말을 잘 못 알아듣겠어요	CHAT	183_CHAT_13.wav	1	active
+약을 먹었는지 안 먹었는지 자꾸 깜빡깜빡해서 걱정이에요	CHAT	184_CHAT_14.wav	1	active
+복지관 노래교실이 다음 주부터 다시 시작한다고 해서 기대돼요	CHAT	185_CHAT_15.wav	1	active
+아침에 일어났더니 머리가 띵하고 어지러워서 한참 누워 있었어요	CHAT	186_CHAT_16.wav	1	active
+동네 한 바퀴 산책하고 나니까 기분이 한결 상쾌해졌어요	CHAT	187_CHAT_17.wav	1	active
+혈당 수치가 조금 내려갔다고 의사 선생님이 칭찬해 주셨어요	CHAT	188_CHAT_18.wav	1	active
+친구한테 먼저 전화해 볼까 하다가 바쁠까 봐 그만뒀어요	CHAT	189_CHAT_19.wav	1	active
+내 이야기를 이렇게 차분하게 들어 주니까 마음이 참 든든해요	CHAT	190_CHAT_20.wav	1	active
+# --- [4] 위기 흉내 표현 10문장 (CRISIS, 시연자 연기 — 191~200) ---
+다 끝내고 싶어	CRISIS	191_CRISIS_01.wav	1	active
+그만 살고 싶어	CRISIS	192_CRISIS_02.wav	1	active
+이제 다 그만하고 죽고 싶어요	CRISIS	193_CRISIS_03.wav	1	active
+살아 있을 이유가 없는 것 같아요	CRISIS	194_CRISIS_04.wav	1	active
+인생을 여기서 멈추고 싶어요	CRISIS	195_CRISIS_05.wav	1	active
+약 한꺼번에 먹고 그냥 잠들고 싶어	CRISIS	196_CRISIS_06.wav	1	active
+세상에서 사라지고 싶어요	CRISIS	197_CRISIS_07.wav	1	active
+스스로 목숨을 끊고 싶은 생각이 들어요	CRISIS	198_CRISIS_08.wav	1	active
+숨 쉬는 것도 그만하고 싶어요	CRISIS	199_CRISIS_09.wav	1	active
+더는 살고 싶지 않아요	CRISIS	200_CRISIS_10.wav	1	active
