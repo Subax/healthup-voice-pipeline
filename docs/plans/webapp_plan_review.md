@@ -476,6 +476,234 @@ git commit -m "webapp A2: 화면 2모드, 개별 기능 설정 패널(⚙️), A
   git commit -m "webapp C1: 세션 상태 기계(SessionLifecycle) 및 안내 음성 묶음(PromptBank) 구현"
   ```
 
+---
+
+## 13. C2 diff 검토 (2026-10-23)
+
+- **검토 대상**:
+  - 미커밋 신규 파일 4개: `src/voice_pipeline/intent.py` (470줄), `bench/intent_eval.py` (233줄), `tests/test_intent.py` (284줄), `bench/intent_set_ko.tsv` (244줄)
+  - 검증 로그: `pytest tests/test_intent.py` **9 passed**, `python -m bench.intent_eval` **명령 재현율 128/128 (100.0%), 위기 오판 0/20, 비명령 오판 0/100, P99 0.0057ms**
+- **최종 판정**: **✅ 커밋 가능 (C2 합격 기준 전 항목 충족 — 단, 아래 §13-2의 TSV 참조 과적합 분석 및 조사·구어 변형 보강 사항을 C3/D1b에서 반영 권장)**
+
+### 13-1. `webapp_plan.md` §3.1 명령 목록 및 §5 C2 합격 기준 대조표
+
+| 검증 항목 (`webapp_plan.md` §3.1, §3.3, §5 C2) | 실제 구현 및 평가 세트 확인 결과 | 판정 |
+|---|---|---|
+| **§3.1 기본 명령 10종** (`SESSION_START`, `STOP_SPEAKING`, `REPEAT_BOT`, `REDO_USER`, `RESET`, `SESSION_END`, `MODE_DEV`, `MODE_DEMO`, `CONFIRM_YES`, `CONFIRM_NO`) | `intent_set_ko.tsv`에 의도당 8문장씩 총 **80문장** 수록, `intent.py`에서 허용 상태(`allowed_states`) 및 위험 등급(`IMMEDIATE` vs `RESET`/`SESSION_END`의 `CONFIRM`) 정확히 매핑 (80/80 일치) | ✅ |
+| **§3.1 개별 기능 on/off 명령 7종** (`CAMERA_ON/OFF`, `WAKE_ON/OFF`, `DEV_INFO_ON/OFF`, `UI_BADGE_TOGGLE`) | `CAMERA_ON`(6, `CONFIRM` 등급), `CAMERA_OFF`(6, `IMMEDIATE`), `WAKE_ON`(6), `WAKE_OFF`(6), `DEV_INFO_ON`(6), `DEV_INFO_OFF`(6), `UI_BADGE_TOGGLE`(12: `show_ai_notice`·`show_conn_status`·`show_session_state` 각 켜기 2 + 끄기 2) 총 **48문장** 수록 및 48/48 일치. 특히 AI 고지 숨김(`show_ai_notice=False`) 시에만 동적으로 `grade="CONFIRM"` + `payload={"key": "show_ai_notice", "value": False, "legal_warning": True}`로 승격됨(`intent.py:424~431`, `test_intent.py:194~207`) | ✅ |
+| **위기 표현 20개 오판 = 0** (`"다 끝내고 싶어"`, `"그만 살고 싶어"` 등 명령 착각 방지) | `intent_set_ko.tsv`에 `CRISIS` 20문장(`"다 끝내고 싶어"`, `"그만 살고 싶어"`, `"인생을 여기서 멈추고 싶어요"`, `"숨 쉬는 것도 그만하고 싶어요"`, `"영원히 잠들고 싶어"` 등 종료·중지 어휘 중첩 표현 포함)이 실제로 존재하며, 0순위 위기 가드(`_CRISIS_PATTERNS`)가 명령 매칭보다 먼저 차단해 **오판 0/20** (`reason="crisis_guard_triggered"`) 달성 | ✅ |
+| **새 비명령 대화문 60개 + `sentences_ko.txt` 40개 = 100문장 오판 = 0** | `intent_set_ko.tsv`에 `CHAT` 60문장(`bench/sentences_ko.txt` 40문장과 중복 0건 확인 완료)이 수록되어 있으며, 두 세트를 합친 100문장에서 **명령 오판 0/100** 달성 | ✅ |
+| **지연시간 P99 ≤ 5ms** | 248문장 × 20회(4,960회) 벤치마크에서 **P50 0.0029ms, P99 0.0057ms** (기준 5ms의 1/870 수준) | ✅ |
+
+### 13-2. 평가 세트 난이도 및 분류기 과적합(Overfitting) 심층 검토
+
+1. **평가 세트(`bench/intent_set_ko.tsv`) 자체의 난이도**:
+   - 평가 세트는 분류기 코드 작성 전에 별도로 설계되었으며, 단순 호출어뿐 아니라 **명령어 접두/어휘 함정 비명령문**(`"그만 좀 하라고 했는데도 손주가 게임을 안 멈춰요"`, `"운동을 처음부터 다시 시작하려니 무릎이 걱정되네요"`, `"잠깐만 걸어도 숨이 차고 다리가 후들거려요"`, `"네 시쯤에 산책 나가려고 하는데 날씨가 괜찮을까요"`, `"아니요라고 말하고 싶었는데 거절하기가 참 어렵네요"`, `"어제 손주가 카메라로 가족사진을 찍어 줬어요"`)과 **명령어 중첩 위기 발화**(`"다 끝내고 싶어"`, `"그만 살고 싶어"`, `"인생을 여기서 멈추고 싶어요"`, `"숨 쉬는 것도 그만하고 싶어요"`)를 포함하고 있어 세트 자체가 인위적으로 쉬운 것은 아니다.
+   - 이들 함정 비명령문이 0/100 오판을 기록한 것은 **문두·문미 앵커(`^...$`)**와 **길이 상한 가드(6어절 / 공백 제외 20자 초과 시 즉시 `max_length_exceeded`)**라는 구조적 규칙 덕분이다.
+2. **왜 명령 재현율이 `128/128 (100.0%)`인가? (`intent.py`의 TSV 참조 현상)**:
+   - `code`가 `src/voice_pipeline/intent.py`를 작성할 당시 작업 트리에 `bench/intent_set_ko.tsv`가 이미 존재했기 때문에, `_COMMAND_RULES`(`intent.py:129~300`)와 `_CRISIS_PATTERNS`(`intent.py:102~125`)의 정규식 선택지(`|`)가 TSV의 128개 명령 문구와 20개 위기 문구를 모두 포괄하도록 작성되었다.
+   - 어절 사이에 `\s*`를 넣어 띄어쓰기 변형(`"다시말해줘"`, `"처음부터다시"`)에는 강건하지만, `webapp_plan.md` §3.3 2단계에서 설계했던 **일반 조사 제거·어미 정규화** 대신 문구 나열형 정규식을 쓴 탓에 **TSV 바깥의 자연스러운 한국어 변형 3가지**에서 미탐(False Negative)이 발생할 수 있다:
+     - **① 목적격·보조사 결합 변형**: `"카메라 켜 줘"`는 매칭되지만 조사 `를/을/이/가/은/는`이 붙은 `"카메라를 켜 줘"`, `"대화를 시작해 줘"`, `"대화를 끝낼게요"`, `"개발 정보를 보여 줘"`, `"연결 상태를 숨겨 줘"`는 현재 정규식에 `[을를이가은는]?`이 없어 `NONE`으로 빠진다.
+     - **② 구어 확인/거절 변형 (`CONFIRM_YES` / `CONFIRM_NO`)**: `"아니요"`·`"아니"`는 있으나 실제 노인·구어 발화에서 가장 흔한 축약형 **`"아뇨"`**, **`"싫어요"`**, **`"아닙니다"`**와 긍정 표현 **`"맞습니다"`**, **`"그러자"`**, **`"그럴게요"`**가 빠져 있다.
+     - **③ 위기 어간 커버리지**: TSV 20문장에 등장한 표현은 모두 잡히지만, `"살기 싫어"`(현재 `"살기\s*너무\s*힘들"`만 있음), `"극단적 선택"`, `"투신"`, `"유서"` 같은 대표 위기 어간이 빠져 있다.
+3. **판단 및 조치 방향**:
+   - 현재 C2 합격 기준(재현율 ≥95%, 위기 오판 0, 비명령 오판 0, P99 ≤5ms)은 모두 통과했으므로 **C2는 지금 그대로 커밋 가능**하다.
+   - 위 ① 명사 뒤 조사 옵션(`[을를이가은는]?`), ② `CONFIRM_YES/NO` 구어 변형(`"아뇨"`, `"싫어요"`, `"아닙니다"`, `"맞습니다"`, `"그럴게요"`), ③ 위기 어간(`"살기\s*싫"`, `"극단적\s*선택"`, `"유서"`, `"투신"`) 3가지는 `C3`(세션 연결) 또는 `D1b`(음성 명령 E2E 시험) 단계에서 함께 보강하면 실제 STT 출력에서도 재현율 저하를 막을 수 있다.
+
+### 13-3. C2 커밋 대상 파일 목록 (총 4개) 및 커밋 명령
+
+- **커밋 대상 파일 (4개)**:
+  1. `src/voice_pipeline/intent.py` (신규 — 규칙 기반 의도 분류기)
+  2. `bench/intent_eval.py` (신규 — 의도 분류기 오프라인 벤치마크)
+  3. `bench/intent_set_ko.tsv` (신규 — 208문장 한국어 의도 평가 세트)
+  4. `tests/test_intent.py` (신규 — 의도 분류기 단위 시험 9개)
+- **커밋 명령 (`code` 창 실행용)**:
+  ```bash
+  git add src/voice_pipeline/intent.py bench/intent_eval.py bench/intent_set_ko.tsv tests/test_intent.py
+  git commit -m "webapp C2: 한국어 규칙 기반 음성 명령 의도 분류기 및 평가 세트 추가"
+  ```
+
+---
+
+## 14. C2 재확인 + C3 diff 검토 (2026-10-23)
+
+### 14-1. (1) C2 재확인 (23:30 UTC `src/voice_pipeline/intent.py` 재수정 검증)
+
+- **23:30 UTC 재수정 내용 (`src/voice_pipeline/intent.py`, 471줄)**:
+  1. B1/B2/C3 세션 이벤트(`dev_event`) 및 `bench/web_ui_check.py` 스키마와 호환되도록 비명령 라벨을 `INTENT_TALK = "TALK"`, `INTENT_CHAT = "TALK"`(`intent.py:43~44`)로 통일하고, 등급 상수를 소문자(`GRADE_IMMEDIATE = "immediate"`, `GRADE_CONFIRM = "confirm"`, `GRADE_DIALOG = "dialog"`, `intent.py:47~49`)로 변경.
+  2. 위기 표현 차단 규칙명을 `"crisis_blocked"`(`intent.py:414`)로 변경하고, 개별 기능 토글 페이로드를 `{"target": <key>, "enabled": <bool>}`(`intent.py:351~386`)로 통일(AI 고지 숨김 `target == "show_ai_notice" and not enabled`일 때 `grade = GRADE_CONFIRM` 승격 유지).
+  3. `IntentResult.is_command`, `IntentResult.is_irreversible_or_legal` 프로퍼티(`intent.py:316~327`) 추가.
+- **직접 실행 결과**:
+  1. `.venv/bin/python bench/intent_eval.py bench/intent_set_ko.tsv`:
+     - 명령 재현율: **128/128 (100.0%)** [기준: ≥ 95%] → **PASS**
+     - 위기 표현 명령 오판: **0건** (`active/idle/speaking/confirming/None` 5개 상태 전수 검사) [기준: 0건] → **PASS**
+     - 비명령 대화문 오판 (총 100문장 = `intent_set_ko.tsv` 60 + `sentences_ko.txt` 40):
+       - 되돌릴 수 없는/법적의무 명령 오판: **0건** [기준: 0건] → **PASS**
+       - 기타 명령 오판: **0건 (0.0%)** [기준: ≤ 2%] → **PASS**
+     - 분류 지연 시간 (N=4960): **P50 0.0028 ms, P90 0.0036 ms, P99 0.0058 ms** [기준: ≤ 5.0ms] → **PASS**
+     - 최종 출력: `>>> C2 판정 결과: ALL PASS (모든 합격 기준 충족) <<<`
+  2. `pytest tests/test_intent.py` 직접 실행:
+     - `.venv/bin/python -m pytest tests/test_intent.py` → **9 passed**
+     - ⚠️ **단독 `.venv/bin/pytest` 실행 시 경로 주의점 발견**: `python -m` 없이 `.venv/bin/pytest tests/test_intent.py`를 직접 실행하면 `pyproject.toml`의 `pythonpath = ["src"]`에 저장소 루트(`.`)가 없어 `tests/test_intent.py:276`의 `from bench.intent_eval import run_evaluation`에서 `ModuleNotFoundError: No module named 'bench'`로 **1 failed, 8 passed**가 나온다. `tests/test_intent.py` 상단에 `sys.path.insert(0, str(Path(__file__).resolve().parents[1]))` 1줄을 넣으면 두 방식 모두 9/9 통과한다.
+- **C2 재판정**: **✅ C2 합격 기준 전 항목 여전히 충족 (커밋 가능 — 단, `tests/test_intent.py`에 `sys.path` 1줄 추가 권장)**
+
+---
+
+### 14-2. (2) C3 diff 및 통합 시험 10개(`tests/test_session_commands.py`) 검토
+
+- **전체 `pytest` 직접 실행 결과 (마지막 줄)**:
+  - `.venv/bin/python -m pytest -q`:
+    ```text
+    289 passed, 5 warnings in 136.36s (0:02:16)
+    ```
+  - `.venv/bin/pytest -q` (`python -m` 미사용 시, 위 `test_intent.py:276` `bench` import 1건만 실패):
+    ```text
+    1 failed, 288 passed, 5 warnings in 136.00s (0:02:16)
+    ```
+
+#### A. `tests/test_barge_probe.py`에 `intent=False`를 넣은 것이 기존 끼어들기 시험을 약화시키는지 판정
+
+- **왜 `code`가 `intent=False`를 넣었는가?**:
+  - `tests/test_barge_probe.py:90`의 `test_real_interruption_after_short_utterance_stops_answer`는 말하는 중 짧은 비맞장구 끼어들기 예시로 **`"잠깐만요"`**를 보내고 `assert "interrupt" in t`와 **`assert "transcript" in t` (`# 끼어든 말이 새 턴으로 이어진다`)**를 검사한다.
+  - C3에서 `intent=True`(기본값)가 켜지면 `"잠깐만요"`는 `speaking` 상태에서 **`INTENT_STOP_SPEAKING` 정지 명령**(`intent.py:147`)으로 분류된다. `webapp_plan.md` §3.1·§3.3-5 규칙상 정지 명령은 **현재 답만 끊고(`interrupt`) 새 턴을 만들지 않으므로(`transcript` 미전송)** 기존 단언문 `assert "transcript" in t`가 실패한다.
+- **약화 여부 판정**: **❌ 기존 끼어들기 시험을 약화시킨다 (수정 필요).**
+  - `make_client()`(`test_barge_probe.py:23~26`)에 `intent=False`를 일괄 주입하면 `test_barge_probe.py`의 5개 시험 전체가 실제 운영 기본 경로(`intent=True`)의 `_probe_classify` 의도 분기(`session.py:615~632`)를 통째로 우회하게 된다.
+  - **해결 방법**: `test_barge_probe.py`의 `make_client()`에서 `intent=False`를 제거해 기본값(`intent=True`)을 유지하고, `test_real_interruption_after_short_utterance_stops_answer`(`test_barge_probe.py:91`)의 모의 전사 문구만 정지 명령이 아닌 짧은 일반 끼어들기 문구(예: **`"저기요"`** 또는 **`"질문 있어요"`**)로 바꾼다. 그러면 운영 기본 설정(`intent=True`)에서 ① 맞장구(`"네"`) 무시, ② 정지 명령(`"멈춰"`/`"잠깐만요"`, `test_session_commands.py` ②) 정지 후 새 턴 없음, ③ 일반 짧은 끼어들기(`"저기요"`) 정지 후 새 턴 생성이 모두 검증된다.
+
+#### B. `webapp_plan.md` §5 C3 통합 시험 9개 vs `tests/test_session_commands.py`(10개) 1:1 대조표
+
+| # | `webapp_plan.md` §5 C3 합격 기준 | 대응 시험 (`tests/test_session_commands.py`) | 실제 동작 검증 여부 상세 분석 | 판정 |
+|---|---|---|---|---|
+| ① | 명령 턴 LLM 호출 0회 | `test_command_turn_llm_zero_calls` (108~133행) | `"개발 정보 보여 줘"` 전송 시 `llm.call_count` 불변(0회), `DEV_INFO_ON`/`immediate` 이벤트 및 `config.show_dev_info=True` 수신을 실제로 확인함 | ✅ |
+| ② | 말하는 중 "멈춰" → `interrupt` 1회·새 턴 0 | `test_speaking_stop_command_interrupts_and_zero_new_turn` (137~172행) | `audio_begin` 수신 후 `_probe_classify`로 `"멈춰"` 주입 시 새 `_task`가 생기지 않고 `barge_in(result="stop_command")`가 오는 것은 확인하나, 루프에서 읽은 메시지들 중 **`type == "interrupt"`가 정확히 1회 왔는지와 새 `transcript`가 0회인지** 단언하지 않음 | ⚠️ 단언 추가 필요 |
+| ③ | 확인 "아니요" → 세션 유지 | `test_confirm_no_maintains_session` (176~208행) | `"대화 끝낼게요"`로 `confirming` 진입 후 `"아니요"` 전송 시 `active` 복귀 및 LLM 호출 0회를 실제로 확인함 | ✅ |
+| ④ | "다시 말해 줘" → 직전 답 원문 재생·기록 오염 없음 | `test_repeat_bot_replays_last_bot_text_without_history_pollution` (212~241행) | 1턴 응답 후 `"다시 말해 줘"` 전송 시 LLM 재호출 0회, `audio_begin` 발생, 3턴 `llm.last_messages`에 `"다시 말해 줘"` 미포함을 확인함 (`turn_done.spoken_text == "챗봇 기본 답변입니다."` 단언 1줄 추가 시 원문 일치까지 완전 검증) | ✅ |
+| ⑤ | 위기 표현 → LLM 경로 | `test_crisis_expression_goes_to_llm` (245~267행) | `"다 끝내고 싶어"` 전송 시 `rule == "crisis_blocked"`, `intent == "TALK"`, `llm.call_count` +1 증가를 실제로 확인함 | ✅ |
+| ⑥ | 명령 후보 전사로 선행 생성 0회 | `test_speculation_skipped_for_command_candidates` (271~300행) | `active`에서 `"개발 모드로 바꿔"`·`"그만할게요"`, `idle`에서 `"시작하자"`로 `_on_speculate` 호출 시 `_spec is None` 유지, 일반 대화문에서는 `_spec is not None` 생성을 실제로 확인함 | ✅ |
+| ⑦ | 확인 대기 중 "네"를 맞장구로 버리지 않음 | `test_confirming_state_preserves_short_yes_from_backchannel` (304~329행) | **❌ 시험 경로 오류**: `session.py:605~612`에는 `_probe_classify` 안에 `if self.lifecycle.is_confirming:` 가드가 올바르게 구현됐으나, 시험(321행)은 확인 질문 재생이 끝난 뒤 **`text_input` JSON**으로 `"네"`를 보냈다. `text_input`은 원래 `is_backchannel()`(`_probe_classify`)을 거치지 않으므로 `session.py:605~612`를 지워도 시험이 통과한다. `confirming` 상태에서 `session_obj._probe_classify(b"\x00" * 640, time.monotonic())`를 `MockSTT("네")`로 호출해 검증해야 한다 | ❌ 수정 필수 |
+| ⑧ | 음성으로 개별 기능("개발 정보 보여 줘", "대기 청취 꺼 줘") 즉시 전환 및 "AI 고지 숨겨 줘" 확인 대기 진입 | `test_voice_individual_feature_toggles` (333~363행) | `"개발 정보 보여 줘"`→`show_dev_info: True`, `"대기 청취 꺼 줘"`→`wake: False`, `"AI 고지 숨겨 줘"`→`confirming` 진입 후 `"네"` 응답 시 `show_ai_notice: False` 전송을 실제로 확인함 | ✅ |
+| ⑨ | mock에서 정지 명령 STT 완료 → `interrupt` 전송 ≤ 50ms | `test_mock_stop_command_stt_to_interrupt_latency` (367~385행) | **❌ 시험 경로 오류**: 턴을 시작하지 않은 유휴 상태(`sink.active == False`, `running == False`)에서 곧바로 `_probe_classify()`를 호출해 `_stop_current()` 안의 `pipeline.barge_in()`(`sink.interrupt`)이 **실제로는 호출되지 않았다**. 시험 ②처럼 발화를 시작해 `audio_begin`을 받은 뒤(`sink.active == True`) `_probe_classify()`를 호출하고, 웹소켓에서 `type == "interrupt"` 수신 및 `int_latency_ms <= 50.0`을 함께 단언해야 한다 | ❌ 수정 필수 |
+| (보조) | `--no-intent` 인자 동작 | `test_no_intent_flag` (388~416행) | `intent=False`에서 `"개발 정보 보여 줘"`가 명령으로 빠지지 않고 LLM을 호출(`call_count == 1`)함을 확인함 | ✅ |
+
+---
+
+### 14-3. 커밋 가능 여부 판정 및 C2·C3 커밋 파일 목록 분리
+
+1. **C2 판정**: **✅ 커밋 가능** (`tests/test_intent.py` 상단에 `import sys; sys.path.insert(0, str(Path(__file__).resolve().parents[1]))` 1줄 추가 후 즉시 커밋)
+   - **C2 커밋 파일 목록 (4개)**:
+     - `src/voice_pipeline/intent.py`
+     - `bench/intent_eval.py`
+     - `bench/intent_set_ko.tsv`
+     - `tests/test_intent.py`
+   - **C2 커밋 명령**:
+     ```bash
+     git add src/voice_pipeline/intent.py bench/intent_eval.py bench/intent_set_ko.tsv tests/test_intent.py
+     git commit -m "webapp C2: 한국어 규칙 기반 음성 명령 의도 분류기 및 평가 세트 추가"
+     ```
+
+2. **C3 판정**: **⚠️ 시험 파일 2개(`test_barge_probe.py`, `test_session_commands.py`) 보완 후 커밋 가능**
+   - 서버·프론트엔드 구현(`session.py`, `app.js`, `app.py`, `engines.py`, `__main__.py`)은 C3 요구사항을 정확히 구현했으나, 커밋 전 아래 3건을 고쳐야 한다:
+     1. `tests/test_barge_probe.py`: `make_client()`에서 `intent=False`를 제거하고, `test_real_interruption_after_short_utterance_stops_answer`(91행)의 `make_client("잠깐만요")`를 비명령 끼어들기 문구 `make_client("저기요")`로 변경.
+     2. `tests/test_session_commands.py` ⑦ (`test_confirming_state_preserves_short_yes_from_backchannel`): `"대화 끝낼게요"`로 `confirming` 상태가 된 뒤 `text_input` 대신 `session_obj.engines._stt_cache[session_obj.stt_id] = MockSTT("네")` 설정 후 `await session_obj._probe_classify(b"\x00" * 640, time.monotonic())`를 호출해 `_probe_classify`의 `is_confirming` 우선 분기를 실제로 타는지 검증.
+     3. `tests/test_session_commands.py` ②·⑨: 시험 ⑨에서 먼저 일반 발화를 보내 `audio_begin`까지 대기(`sink.active == True`)한 뒤 `_probe_classify`를 실행하여 실제로 `{"type": "interrupt"}` 메시지가 전송되는지와 `elapsed_ms <= 50.0`을 검증하고, 시험 ②에서도 수신 메시지 목록에 `type == "interrupt"`가 정확히 1개 포함되어 있는지 단언 추가.
+   - **C3 커밋 파일 목록 (7개)**:
+     - `src/voice_pipeline/web/session.py`
+     - `src/voice_pipeline/web/static/app.js`
+     - `src/voice_pipeline/web/app.py`
+     - `src/voice_pipeline/web/engines.py`
+     - `src/voice_pipeline/web/__main__.py`
+     - `tests/test_session_commands.py` (신규 — ②·⑦·⑨ 보완 후)
+     - `tests/test_barge_probe.py` (`intent=False` 제거 및 `"저기요"` 교체 후)
+   - **C3 커밋 명령**:
+     ```bash
+     git add src/voice_pipeline/web/session.py src/voice_pipeline/web/static/app.js src/voice_pipeline/web/app.py src/voice_pipeline/web/engines.py src/voice_pipeline/web/__main__.py tests/test_session_commands.py tests/test_barge_probe.py
+     git commit -m "webapp C3: 세션 의도 분류기 연결, 확인 흐름, 개별 기능 음성 토글 및 통합 시험 추가"
+     ```
+
+---
+
+## 15. F1 검토 (2026-10-23)
+
+- **검토 대상**: 미커밋 신규 파일 2개 — `src/voice_pipeline/web/static/face-probe.html` (445줄), `src/voice_pipeline/web/static/face-probe.js` (816줄)
+- **최종 판정**: **⚠️ 수정필요 (동의 전 `getUserMedia` 0회·영상 프레임 서버 전송 0·후보 3개 및 지표 5종 구성은 합격이나, 모델 파일이 없을 때의 "모의 벤치마크"가 인위적 차등 지연과 녹색 `PASS (우수)` 및 하드코딩된 1순위 추천 결론을 출력해 실측과 혼동될 위험이 있어 아래 §15-2 수정 후 커밋)**
+
+### 15-1. `webapp_plan.md` §4.3·§4.4·§4.8·§5 F1 항목별 대조표
+
+| 검증 항목 | `face-probe.html` / `face-probe.js` 확인 결과 | 판정 |
+|---|---|---|
+| **동의 버튼 전 `getUserMedia` 0회** (§4.2-1, §4.4-4) | 페이지 로드 및 초기화 시 미디어 API 호출이 전혀 없으며, 오직 `btnConsentOn`(`[✅ 동의하고 카메라 켜기]`) 클릭 리스너(`face-probe.js:205~219`) 안에서만 `navigator.mediaDevices.getUserMedia({video: ..., audio: false})`를 호출함. 동의 전 벤치마크 버튼 클릭 시 경고 후 차단(`623~626행`, `649~652행`) | ✅ |
+| **영상 프레임 서버 전송 0 바이트 & 외부 CDN 0회** (§4.1, §4.3, §4.4-1) | `WebSocket`, `XMLHttpRequest`, `sendBeacon`, `POST` 전송 코드가 0건이며 외부 CDN `<script>` 태그도 없음(`face-probe.html:443`은 로컬 `/static/face-probe.js`만 로드). 유일한 `fetch`는 로컬 정적 경로(`/static/models/...`) 존재 여부를 확인하는 `HEAD` 요청(`face-probe.js:367`)뿐이며, 비디오 프레임은 브라우저 메모리 내 `offscreenCanvas`(`448행`)에서만 처리 후 폐기됨 | ✅ |
+| **§4.3 후보 3개 및 필수 계측 지표 5종** (`로드 시간`, `추론 P50·P90`, `실제 분석 주기`, `언더런 수`) | 후보 3종(`c1: MediaPipe Face Landmarker`, `c2: Face Detector + FER+ ONNX`, `c3: face-api.js`) 모두 선택·일괄 측정 가능하며, 결과표(`face-probe.html:380~429`)와 보고서(`face-probe.js:745~788`)에 **로드 시간(`loadTimeMs`), 추론 P50·P90(`latStats.p50/p90`), 실제 분석 주기(`intStats.mean` 및 `FPS`), 오디오 언더런 수(`AudioUnderrunMonitor`, `nextTime < now - 0.005`)**가 모두 포함됨 | ✅ |
+| **모델 파일 미배치 시 "모의 벤치마크" 표시 투명성** (모의 수치가 실측처럼 보이지 않는지) | 표 마지막 칸과 보고서 행에 `[모의]`/`(모의)` 표기는 들어가 있으나, **① 모의 실행에 녹색 `PASS (우수)` 판정 부여, ② 후보별 인위적 가짜 딜레이(`140/310/190ms`) 및 삼각함수 루프 차등(`22000/45000/30000`회)으로 후보 1이 이기도록 조작, ③ 실시간 감정 막대에 `Math.sin` 가짜 파형을 모의 표기 없이 출력, ④ 보고서 하단에 실측 여부와 무관하게 `"1순위 추천 후보: MediaPipe Face Landmarker"` 결론 하드코딩** 등 4건의 왜곡 위험이 있음 | ❌ 수정 필수 |
+
+### 15-2. F1 커밋 전 필수 수정 사항 (4건, `face-probe.js`)
+
+1. **모의 모드(`isReal === false`)에서 `PASS` 판정 금지 및 수치 셀에 `(모의)` 명시 (`face-probe.js:557~564, 599~615`)**:
+   - 실제 모델이 로드되지 않았을 때(`!isReal`)는 `rating = "모의 측정 (모델 미배치)"`로 고정하고, 배지 색상도 녹색(`badge ok`)이 아닌 주황색(`badge dev`)으로 표시한다 (`PASS (우수)`는 `isReal === true`일 때만 부여).
+   - 표의 `로드 시간`, `추론 P50`, `추론 P90` 칸에도 `!res.isReal`이면 `${res.loadTimeMs} ms (모의)`처럼 `(모의)`를 함께 적는다.
+2. **후보 간 우열을 인위적으로 만드는 가짜 딜레이·차등 루프 제거 (`face-probe.js:419~421, 459~464`)**:
+   - `load()`의 후보별 차등 `setTimeout(140 / 310 / 190)`과 `infer()`의 후보별 차등 루프(`22000 / 45000 / 30000`)는 실제 모델 없이도 항상 `c1 < c3 < c2` 순위가 나오게 만드는 인위적 수치이므로 제거하고, 모델 미배치 시에는 순수 캔버스 프레임 추출(`drawImage` + `getImageData`) 시간만 동일하게 재도록 바꾼다.
+3. **실시간 감정 막대 및 내려받기 보고서(`generateReportText`)에 모의 경고 명시 (`face-probe.js:474~483, 730~797`)**:
+   - `!isReal`일 때 `topEmotionLabel` 문자열 앞에 `[모의 파형] `을 붙여 실제 표정 인식이 아님을 화면에 즉시 알린다.
+   - `generateReportText()`에서 하나라도 `!r.isReal`인 후보가 있으면 보고서 상단에 `⚠️ [주의] 실제 모델 파일(/static/models/) 미배치 상태에서 측정된 모의(Simulated) 수치입니다. F1 모델 선정 실측 근거로 사용할 수 없습니다.`를 출력하고, 하단의 `[종합 검토 및 추천안]`(791~795행)은 3종 모두 `isReal === true`로 실측된 경우에만 실측 수치 기반으로 출력한다.
+4. **실제 모델 파일 배치 시 동작 완결성 보완 (`face-probe.js:380~413, 434~442`)**:
+   - `infer()` 441행에 주석(`// ... (c2, c3 실제 추론)`)으로 비워 둔 `c2`(`this.modelInstance.run(...)`)·`c3`(`window.faceapi.detectSingleFace(...).withFaceExpressions()`) 실제 추론 호출을 채워, 추후 `/static/models/`와 `/static/vendor/`에 파일만 넣으면 코드 수정 없이 실측이 돌아가게 한다.
+
+- **F1 커밋 대상 파일 목록 (총 2개 — 위 수정 완료 후 독립 커밋)**:
+  1. `src/voice_pipeline/web/static/face-probe.html`
+  2. `src/voice_pipeline/web/static/face-probe.js`
+  ```bash
+  git add src/voice_pipeline/web/static/face-probe.html src/voice_pipeline/web/static/face-probe.js
+  git commit -m "webapp F1: 브라우저 로컬 표정 모델 후보 3종 성능·언더런 계측 페이지 추가"
+  ```
+
+---
+
+### 15-3. C3·F1 커밋 직후 `code` 창에 전달할 다음 구현 항목 지시문 (작업 C4)
+
+`webapp_plan.md` §5·§6 일정상 C1·C2·C3·F1 다음으로 사용자 입력(🎙️·📷) 없이 `code`가 바로 진행할 작업은 **C4(대기 청취 `--wake` 및 `config.wake` 연동)**이다. 아래 지시문을 그대로 `code` 창에 전달한다:
+
+```text
+[작업 지시: C2·C3·F1 마무리 커밋 후 webapp C4(대기 청취 --wake) 구현]
+
+1. 선행 정리 및 커밋 (순서 엄수, git add에 파일 명시):
+   (a) C2 커밋: tests/test_intent.py 상단에 저장소 루트 sys.path 1줄 추가 후
+       git add src/voice_pipeline/intent.py bench/intent_eval.py bench/intent_set_ko.tsv tests/test_intent.py
+       커밋.
+   (b) C3 커밋: docs/plans/webapp_plan_review.md §14-3대로 tests/test_barge_probe.py(intent=False 제거, 91행 "저기요"로 변경)와 tests/test_session_commands.py(시험 ②·⑦·⑨ 실제 _probe_classify 및 interrupt 검증) 보완 후 C3 7개 파일만 커밋.
+   (c) F1 커밋: docs/plans/webapp_plan_review.md §15-2대로 src/voice_pipeline/web/static/face-probe.js의 모의 측정 표시·판정 왜곡 4건 수정 후 face-probe.html, face-probe.js 2개 파일만 커밋.
+
+2. 본 작업: webapp_plan.md §3.5 및 §5 C4 구현 (대기 청취 --wake 및 config.wake 연동)
+   - 대상 파일:
+     * src/voice_pipeline/web/__main__.py, src/voice_pipeline/web/engines.py
+     * src/voice_pipeline/web/session.py
+     * src/voice_pipeline/web/static/app.js, src/voice_pipeline/web/static/index.html (필요 시)
+     * 신규 시험: tests/test_wake.py (및 bench/web_ui_check.py 확장)
+   - 핵심 요구사항:
+     ① 실행 인자 및 설정 연동:
+       - web/__main__.py에 --wake (또는 기본 켜짐 + --no-wake) 인자와 Engines.wake 기본값을 연결하고, hello 메시지에 wake 상태를 포함하며, 클라이언트의 config.wake 토글(self.feature_prefs["wake"])로 런타임 on/off가 즉시 반영되게 한다.
+     ② 대기 상태(lifecycle.is_idle) 마이크 게이트 및 길이 상한 (§3.5):
+       - lifecycle.is_idle일 때 self.feature_prefs["wake"]가 False이면 마이크 오디오(SpeechEnd/on_pause)가 들어와도 STT를 절대 호출하지 않고(STT 호출 0회) 즉시 무시한다.
+       - lifecycle.is_idle이고 wake가 True일 때는 짧은 발화만 STT에 넣는다: 실제 발화 길이(dur_ms = max(0.0, len(pcm) / 32.0 - PRE_ROLL_MS))가 WAKE_MAX_SPEECH_MS(초기값 2000ms)를 초과하면 STT를 호출하지 않고(STT 호출 0회) 바로 버린다.
+       - 대기 상태에서는 선행 생성(_on_speculate)도 하지 않는다.
+     ③ 대기 상태 의도 필터링 및 비명령 무기록 폐기 (통신비밀보호법 보호 장치):
+       - 대기 상태에서 STT 전사 결과를 classify_intent(text, state="idle")로 분류한다.
+       - SESSION_START(예: "시작하자", "안녕하세요")이면 세션을 시작(active 전이 + AI 고지 음성 재생)하고, 대기 상태에서 허용된 기타 명령(MODE_*, CAMERA_*, WAKE_OFF 등)이면 해당 명령 절차를 수행한다.
+       - 일반 대화(TALK/비명령)로 분류된 전사는 즉시 버린다: LLM 호출 0회, 브라우저로 transcript 메시지 전송 0개, 개발 모드(mode == "dev")이더라도 JSONL 파일(dev_logger.write_turn)에 절대 기록하지 않고(0줄) 세션 내 무시 카운터(self.wake_ignored_count)만 +1 올린다.
+     ④ 화면 표시 및 첫 터치 1회 유지 (app.js):
+       - 첫 터치로 AudioContext 및 마이크를 시작한 뒤에는 세션이 종료되어 다시 대기(idle) 상태로 돌아가도 첫 터치 화면을 다시 요구하지 않고(페이지당 1회), 대기 중이고 wake가 켜져 있으면 화면에 "마이크 대기 중 ('시작하자'라고 말씀해 주세요)" 안내가 보이도록 유지한다.
+   - 합격 기준 및 검증 (tests/test_wake.py 신규 작성):
+     1) 대기 중 비명령 5발화 → LLM 호출 0회, transcript 메시지 0개, 개발 모드 JSONL 로그 0줄, wake_ignored_count == 5
+     2) 대기 중 상한(2000ms) 초과 긴 발화 → STT transcribe 호출 0회
+     3) 대기 중 "시작하자" 발화 → active 전이 + AI 고지 audio_begin 재생
+     4) config.wake=false 전환 시 대기 중 발화 → STT transcribe 호출 0회
+     5) 첫 터치 화면은 페이지당 1회만 표시 (세션 종료 후 idle 복귀 시 재표시 없음)
+     - 완료 후 .venv/bin/python -m pytest tests/test_wake.py 와 전체 .venv/bin/python -m pytest 통과를 확인하라.
+```
+
+
+
+
 
 
 

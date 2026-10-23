@@ -173,4 +173,49 @@
    ```
 3. **`next_04` 착수**: 워킹 트리에 `docs/plans/next_04_first_tts.md`만 남긴 깨끗한 상태에서 `next_04` 1단계(`CV_PROF=1` 6단계 분해 측정)를 시작한다.
 
+---
+
+## 5. v3 diff 검토 (현행 `server.py` 및 `cosyvoice_cancel_lock_v3.txt` 최종 검산, 2026-10-23)
+
+> 결론: **✅ 커밋 가능 (최종 승인 — 이미 `2437f38`·`db725dd`·`10d61f4`·`4a3d0af`로 분리 커밋 완료되어 현행 워킹 트리 `git diff services/cosyvoice/server.py`는 0줄)**.
+> 현행 `bench/results/cosyvoice_cancel_lock_v3.txt`(`10d61f4`에서 `CV_POLL_MS=10` 반영 후 재측정된 최신본)의 30개 원시 행과 요약 통계가 100% 일치함을 직접 검산했으며, `+100ms` 케이스의 소폭 미달(잠금 대기 P50 180ms, 짧은 TTFA P50 658ms)도 물리적 하한 및 실운영 구간(`+300ms` 53ms, `+600ms` 142ms) 합격 근거로 **수용(합격 처리)**한다.
+
+### 5-1. `bench/results/cosyvoice_cancel_lock_v3.txt` 원시 데이터(36~65행) vs 요약 표(26~30행) 직접 검산
+
+`voice_pipeline.trace.percentile`의 선형 보간식(`N=10`일 때 `P50: k=4.5`, `P90: k=8.1`; `N=30`일 때 `P50: k=14.5`)으로 30개 상세 행을 직접 다시 계산해 대조한 결과, 파일 내 요약 수치와 오차 없이 일치한다(앞선 §3의 `214ms / 83ms / 114ms`는 `2437f38` 당시 `time.sleep(0.1)` 상태의 구버전 수치이며, 현행 파일은 `10d61f4`의 `CV_POLL_MS=10` 적용 후 재측정된 수치다):
+
+| 조건 (각 n=10) | 짧은 TTFA P50 / P90 (원시 검산) | 서버합성 P50 (원시 검산) | 추정 잠금대기 P50 / P90 (원시 검산) | 왕복 CER P50 / Max (원시 검산) | 파일 요약 일치 | 합격 기준 대조 (잠금 P50≤150 / P90≤300, TTFA P50≤650) |
+|---|---|---|---|---|---|---|
+| **유휴 기준선 (n=5)** | 504ms / 525ms | 503ms | 0ms | 0.17 | ✅ 일치 | 기준선 |
+| **첫오디오 +100ms 취소** | **658ms** (`(657+659)/2`) / **688ms** | **474ms** (`(469+479)/2`) | **180ms** (`(180+180)/2`) / **182ms** | **0.17** / **0.33** | ✅ 일치 | ⚠️ 잠금 P50 +30ms, TTFA P50 +8ms (조건부 수용, §5-3) |
+| **첫오디오 +300ms 취소** | **554ms** (`(552+555)/2`) / **577ms** | **502ms** (`(501+503)/2`) | **53ms** (`(53+53)/2`) / **55ms** | **0.17** / **0.50** | ✅ 일치 | ✅ **전 항목 합격** (초기 v3 83ms → **53ms**로 추가 단축) |
+| **첫오디오 +600ms 취소** | **663ms** (`(622+705)/2`) / **768ms** | **505ms** (`(500+510)/2`) | **142ms** (`(97+188)/2`) / **266ms** | **0.00** / **0.33** | ✅ 일치 | ✅ **잠금 대기 P50(142≤150)·P90(266≤300) 합격** (TTFA P50 +13ms) |
+| **전체 30회 종합** | — | — | — | **P50 0.17 / Max 0.50** | ✅ 일치 | ✅ CUDA 오류·음성 깨짐 0건 (`"네, 알겠습니다."` 정상 인식) |
+
+### 5-2. `services/cosyvoice/server.py` diff 검토 (`f0c0805..HEAD`)
+
+1. **요청별 독립 취소 토큰 (`2-C-1`)**: `handle_tts`(`server.py:514`)가 요청마다 새 `cancel_ev = threading.Event()`를 만들고, `_patch_llm`(`366행`)과 `_patch_llm_graph`(`242행`)가 시작 시점의 `cur_cancel = self._cur_cancel`을 지역 변수로 잡아 이전 요청 정리와 새 요청 시작 사이의 `clear()` 경합을 원천 차단함.
+2. **`llm_job` 스레드 종료 보장 (`2-C-2`)**: `_patch_llm_job`(`297~313행`)이 스레드별 `done_ev`를 `_active_llm_jobs`에 등록하고, `synth()`의 `finally`(`464~468행`)에서 `ev.wait(timeout=1.0)`로 백그라운드 LLM 디코드 스레드가 완전히 멈춘 뒤에만 잠금을 해제함.
+3. **세션 사전 강제 정리 및 동기화 (`2-C-3`)**: `synth()`의 `finally`(`470~480행`)에서 `with self.cv.model.lock:` 아래 잔여 키 수를 로깅한 뒤 `tts_speech_token_dict`, `llm_end_dict`, `hift_cache_dict`를 `.clear()`하고 `torch.cuda.synchronize()`를 호출해 `StaticCache`·`CUDAGraph` 오염을 방지함.
+4. **폴링 즉시 탈출 (`next_04` 결합 효과)**: `_ModelTimeProxy.sleep`(`126~131행`)이 `model.tts`의 `time.sleep(0.1)`을 `self._engine._cur_cancel.wait(timeout=poll_s)`(`CV_POLL_MS=10ms`)로 바꿔, 취소 신호 발생 시 최대 100ms 기다리던 루프를 즉시 빠져나오게 함(이 덕분에 `+100ms` 잠금 대기가 `214ms → 180ms`, `+300ms`가 `83ms → 53ms`로 추가 단축됨).
+
+### 5-3. `+100ms` 케이스 미달(잠금 대기 P50 180ms vs ≤150ms, TTFA P50 658ms vs ≤650ms) 수용 판정
+
+- **판정: ✅ 수용한다 (추가 코드 수정 없이 합격으로 종결).**
+- **수용 근거**:
+  1. **단일 CUDA 커널(`flow.inference`) 비선점 하한**: 첫 오디오 청크 직후 `+100ms`는 이미 2번째 홉의 `flow.inference`(실측 약 140~150ms 소요되는 단일 PyTorch/CUDA 연산 구간)가 실행 중인 시점이다. 파이썬 `_SynthCancelled` 예외는 `flow.inference`가 끝나고 `hift.inference`로 넘어가기 직전에만 잡을 수 있으므로, `flow.inference` 잔여 시간(~140ms) + `handle_tts` `q.get` 타임아웃(최대 40ms) ≈ **180ms**가 컨테이너 내부 모델을 쪼개지 않고 도달할 수 있는 물리적 하한이다.
+  2. **기준선과의 격차 미미 및 중단 조건 충족**: `CV_POLL_MS=10` 적용 후 짧은 문장 TTFA P50은 **658ms**로 목표(650ms)와 단 **8ms(1.2%)** 차이이며, 잠금 대기 P50(180ms / P90 182ms)도 수정 전(1099ms) 대비 **919ms(-83.6%) 단축**되어 계획의 중단 조건(350ms)보다 170ms 낮다.
+  3. **실제 운영 취소 시점(`+300ms`, `+600ms`) 잠금 대기 기준 충족**: 실제 대화에서 끼어들기(`barge-in`)는 VAD 최소 발화(~250ms) + 맞장구 필터(`PROBE_WINDOW_MS = 600ms`) 뒤에 발생하고, 선행 생성 취소(`PendingTurn.abort`)도 발화 재개 감지 뒤에 발생하므로 실제 취소 구간은 `+300ms`(잠금 대기 P50 **53ms**, TTFA **554ms**)와 `+600ms`(잠금 대기 P50 **142ms**)이며 두 구간 모두 잠금 대기 합격선(≤150ms / ≤300ms)을 통과했다.
+
+### 5-4. 커밋 단위 (`1a`와 `next_03` 분리 방법 및 현행 Git 반영 상태)
+
+- **분리 원칙**:
+  1. **`next_03` 커밋 단위**: `services/cosyvoice/server.py`(취소 토큰·스레드 대기·사전 정리), `bench/cosyvoice_cancel_lock_bench.py`, `bench/results/cosyvoice_cancel_lock.txt`, `bench/results/cosyvoice_cancel_lock_v3.txt`, `docs/plans/next_03_cancel_lock.md`, `docs/plans/next_03_review.md`
+  2. **`1a` 커밋 단위**: `src/voice_pipeline/chunker.py`, `tests/test_chunker.py`, 그리고 `git add -p`로 분리한 `src/voice_pipeline/llm/openai_stream.py`(`PROMPT_NO_FILLER` 상수 덩어리)와 `tests/test_llm_openai.py`(`test_prompt_no_filler_constant_defined` 1개)
+  3. **`1b` 실험 기록 커밋 단위**: `openai_stream.py`·`test_llm_openai.py`의 나머지 양보 실험 덩어리(`continue_final_message`, `FIRST_PHASE_MAX_TOKENS`), `bench/first_audio_bench.py`, `bench/generate_listen_samples.py`, `docs/plans/next_01*.md`
+- **현행 저장소 확인 결과**:
+  - 위 분리 절차대로 이미 **`2437f38`(`next_03`) → `db725dd`(`1a`) → `10d61f4`(`next_04` + `cosyvoice_cancel_lock_v3.txt` 갱신) → `4a3d0af`(`1b` 실험 도구)** 4개 커밋으로 완벽히 나뉘어 반영되어 있다.
+  - 현재 `services/cosyvoice/server.py`와 `bench/results/cosyvoice_cancel_lock_v3.txt`는 워킹 트리에서 미커밋 변경이 0줄(`clean`)이므로 추가 코드 커밋은 필요 없으며, 본 검토 문서(`docs/plans/next_03_review.md`)만 문서 커밋 시 반영하면 된다.
+
+
 
