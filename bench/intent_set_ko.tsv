@@ -1,0 +1,244 @@
+# HealthUp 음성 명령 의도 분류 평가 세트 (webapp_plan 작업 C2)
+# - 작성: 설계·검토 에이전트 (분류기 구현과 독립 분리, §3.4-6)
+# - 열 형식: <문장><TAB><정답 의도> ('#'로 시작하는 줄과 빈 줄은 주석으로 건너뛴다)
+# - 의도 이름 목록 (총 19종 = 명령 17종 + 비명령 평가 라벨 2종):
+#   [1] 기본 명령 (10종, 각 8문장 = 80문장):
+#     - SESSION_START   : 대기(idle) 상태에서 세션 시작
+#     - STOP_SPEAKING   : 말하는 중(speaking) 상태에서 현재 답변 즉시 정지 (새 턴 없음)
+#     - REPEAT_BOT      : 진행(active) 상태에서 직전 봇 답변 다시 듣기
+#     - REDO_USER       : 진행(active) 상태에서 직전 사용자 턴·답변 취소
+#     - RESET           : 진행(active) 상태에서 대화 초기화·새 사용자 (확인 질문 있음)
+#     - SESSION_END     : 진행(active) 상태에서 세션 종료 (확인 질문 있음)
+#     - MODE_DEV        : 진행·대기 상태에서 개발 모드로 전환 (확인 질문 있음)
+#     - MODE_DEMO       : 진행·대기 상태에서 데모 모드로 전환 (확인 질문 있음)
+#     - CONFIRM_YES     : 확인 대기(confirming) 상태에서 긍정 응답
+#     - CONFIRM_NO      : 확인 대기(confirming) 상태에서 부정 응답
+#   [2] 개별 기능 on/off 명령 (7종, 총 48문장, 진행·대기 상태):
+#     - CAMERA_ON       : 얼굴 표정 감정(카메라) 켜기 (6문장, 동의 확인 질문 있음)
+#     - CAMERA_OFF      : 얼굴 표정 감정(카메라) 끄기 (6문장)
+#     - WAKE_ON         : 음성으로 시작(대기 청취) 켜기 (6문장)
+#     - WAKE_OFF        : 음성으로 시작(대기 청취) 끄기 (6문장)
+#     - DEV_INFO_ON     : 데모 화면 위 개발 정보 패널 표시 켜기 (6문장)
+#     - DEV_INFO_OFF    : 데모 화면 위 개발 정보 패널 표시 끄기 (6문장)
+#     - UI_BADGE_TOGGLE : 카메라 표시 / 연결 상태 표시 / AI 고지 표시 토글 (12문장: 배지 3종 × 숨김·표시·한글 발음 '에이아이'·켜기/끄기 포함; AI 고지 숨김은 법적 경고 확인 질문 있음)
+#   [3] 비명령 평가 라벨 (2종, 총 80문장):
+#     - CRISIS          : 위기 표현 20개 (명령 아님 — 분류기는 반드시 비명령(CHAT/None)으로 판정해야 함, 명령 오판 허용 0건)
+#     - CHAT            : 새 비명령 일상·상담 대화문 60개 (분류기는 비명령(CHAT/None)으로 판정해야 함; bench/sentences_ko.txt 40개와 함께 총 100문장으로 평가)
+# - 상태별 평가 및 C2 합격 기준 (webapp_plan.md §3.1, §5 C2):
+#   * SESSION_START는 state="idle", STOP_SPEAKING은 state="speaking", CONFIRM_YES/NO는 state="confirming", 나머지 명령·CRISIS·CHAT은 state="active"(CRISIS는 모든 상태)에서 평가한다.
+#   * 명령 재현율(기본 80 + 개별 기능 48 = 128문장) >= 95%
+#   * CRISIS 20문장 중 명령 판정 = 0건
+#   * 비명령 대화문 100문장(CHAT 60 + bench/sentences_ko.txt 40) 중 되돌릴 수 없는 명령·법적 경고 명령(RESET, SESSION_END, MODE_DEV, MODE_DEMO, CAMERA_ON, UI_BADGE_TOGGLE[AI 고지 숨김]) 오판 = 0건, 나머지 명령 오판 <= 2% (2건 이하)
+#   * 분류 시간 P99 <= 5ms
+# --- [1] 기본 명령 (10종 × 8개 = 80개) ---
+시작하자	SESSION_START
+안녕하세요	SESSION_START
+이야기하고 싶어요	SESSION_START
+대화 시작해 줘	SESSION_START
+시작할게요	SESSION_START
+말동무 해 주세요	SESSION_START
+지금 시작해 주세요	SESSION_START
+얘기 좀 나누고 싶어요	SESSION_START
+잠깐만	STOP_SPEAKING
+멈춰	STOP_SPEAKING
+그만	STOP_SPEAKING
+잠깐만요	STOP_SPEAKING
+그만 말해 줘	STOP_SPEAKING
+말 좀 멈춰 주세요	STOP_SPEAKING
+잠시만 멈춰 봐	STOP_SPEAKING
+거기까지만 말해 줘	STOP_SPEAKING
+다시 말해 줘	REPEAT_BOT
+뭐라고요?	REPEAT_BOT
+못 들었어요	REPEAT_BOT
+방금 한 말 다시 해 주세요	REPEAT_BOT
+다시 한번 말씀해 주세요	REPEAT_BOT
+잘 안 들렸어요 다시 말해 줘	REPEAT_BOT
+뭐라고 하셨어요?	REPEAT_BOT
+한 번만 더 말해 주세요	REPEAT_BOT
+다시 말할게요	REDO_USER
+방금 거 취소	REDO_USER
+방금 한 말 취소해 줘	REDO_USER
+내가 잘못 말했어 다시 할게요	REDO_USER
+방금 말은 지워 주세요	REDO_USER
+이전 말 취소할게요	REDO_USER
+다시 말씀드릴게요	REDO_USER
+방금 내 말 취소	REDO_USER
+처음부터 다시	RESET
+다른 사람이에요	RESET
+처음부터 다시 시작하자	RESET
+대화 기록 지우고 처음부터 해 줘	RESET
+사람이 바뀌었어요	RESET
+새로 시작할래요	RESET
+초기화해 주세요	RESET
+처음부터 다시 할게요	RESET
+그만할게요	SESSION_END
+이제 끝내자	SESSION_END
+대화 끝낼게요	SESSION_END
+이만 종료할게요	SESSION_END
+그만 끝내 주세요	SESSION_END
+오늘 대화는 여기까지 할게요	SESSION_END
+이제 그만 마치자	SESSION_END
+종료해 주세요	SESSION_END
+개발 모드로 바꿔	MODE_DEV
+개발 모드	MODE_DEV
+개발 모드로 전환해 줘	MODE_DEV
+개발자 모드 켜 줘	MODE_DEV
+개발 화면으로 바꿔 주세요	MODE_DEV
+개발 모드로 변경해 줘	MODE_DEV
+개발자 화면 보여 줘	MODE_DEV
+개발 모드로 해 주세요	MODE_DEV
+데모 모드	MODE_DEMO
+데모 모드로 바꿔	MODE_DEMO
+데모 모드로 전환해 줘	MODE_DEMO
+데모 화면으로 바꿔 주세요	MODE_DEMO
+시연 모드로 바꿔 줘	MODE_DEMO
+데모 모드로 변경해 줘	MODE_DEMO
+데모 화면 보여 줘	MODE_DEMO
+데모 모드로 해 주세요	MODE_DEMO
+네	CONFIRM_YES
+응	CONFIRM_YES
+그래요	CONFIRM_YES
+예	CONFIRM_YES
+맞아요	CONFIRM_YES
+그렇게 해 주세요	CONFIRM_YES
+네 맞습니다	CONFIRM_YES
+좋아요	CONFIRM_YES
+아니요	CONFIRM_NO
+아니	CONFIRM_NO
+취소할래요	CONFIRM_NO
+안 할래요	CONFIRM_NO
+아니 괜찮아요	CONFIRM_NO
+하지 마세요	CONFIRM_NO
+아니요 취소해 주세요	CONFIRM_NO
+됐어요 안 할게요	CONFIRM_NO
+# --- [2] 개별 기능 on/off 명령 (7종, 총 48개) ---
+카메라 켜 줘	CAMERA_ON
+표정 인식 켜 줘	CAMERA_ON
+카메라 켜 주세요	CAMERA_ON
+얼굴 감정 켜 줘	CAMERA_ON
+표정 분석 켜 주세요	CAMERA_ON
+카메라 작동시켜 줘	CAMERA_ON
+카메라 꺼 줘	CAMERA_OFF
+표정 인식 꺼 줘	CAMERA_OFF
+카메라 꺼 주세요	CAMERA_OFF
+얼굴 감정 꺼 줘	CAMERA_OFF
+표정 분석 꺼 주세요	CAMERA_OFF
+카메라 중지해 줘	CAMERA_OFF
+음성 시작 켜 줘	WAKE_ON
+대기 청취 켜 줘	WAKE_ON
+음성으로 시작 켜 주세요	WAKE_ON
+대기 마이크 켜 줘	WAKE_ON
+음성 시작 기능 켜 줘	WAKE_ON
+대기 청취 활성화해 줘	WAKE_ON
+음성 시작 꺼 줘	WAKE_OFF
+대기 청취 꺼 줘	WAKE_OFF
+음성으로 시작 꺼 주세요	WAKE_OFF
+대기 마이크 꺼 줘	WAKE_OFF
+음성 시작 기능 꺼 줘	WAKE_OFF
+대기 청취 비활성화해 줘	WAKE_OFF
+개발 정보 보여 줘	DEV_INFO_ON
+지연 표 보여 줘	DEV_INFO_ON
+개발 패널 보여 주세요	DEV_INFO_ON
+개발 정보 켜 줘	DEV_INFO_ON
+지연 시간 표 보여 줘	DEV_INFO_ON
+개발 정보 표시해 줘	DEV_INFO_ON
+개발 정보 숨겨 줘	DEV_INFO_OFF
+지연 표 숨겨 줘	DEV_INFO_OFF
+개발 패널 숨겨 주세요	DEV_INFO_OFF
+개발 정보 꺼 줘	DEV_INFO_OFF
+지연 시간 표 숨겨 줘	DEV_INFO_OFF
+개발 정보 가려 줘	DEV_INFO_OFF
+카메라 표시 숨겨 줘	UI_BADGE_TOGGLE
+카메라 표시 보여 줘	UI_BADGE_TOGGLE
+카메라 배지 꺼 줘	UI_BADGE_TOGGLE
+카메라 배지 켜 줘	UI_BADGE_TOGGLE
+연결 상태 숨겨 줘	UI_BADGE_TOGGLE
+연결 상태 보여 줘	UI_BADGE_TOGGLE
+연결 상태 표시 꺼 줘	UI_BADGE_TOGGLE
+연결 상태 표시 켜 줘	UI_BADGE_TOGGLE
+AI 고지 숨겨 줘	UI_BADGE_TOGGLE
+AI 고지 보여 줘	UI_BADGE_TOGGLE
+에이아이 고지 숨겨 주세요	UI_BADGE_TOGGLE
+에이아이 고지 보여 주세요	UI_BADGE_TOGGLE
+# --- [3] 위기 표현 20개 (CRISIS — 명령 판정 0건이어야 함) ---
+다 끝내고 싶어	CRISIS
+그만 살고 싶어	CRISIS
+이제 다 그만하고 죽고 싶어요	CRISIS
+살아 있을 이유가 없는 것 같아요	CRISIS
+오늘 밤에 다 끝내 버릴래요	CRISIS
+더 이상 버티기 힘들어서 죽고 싶어	CRISIS
+내가 없어져야 다들 편해질 것 같아	CRISIS
+인생을 여기서 멈추고 싶어요	CRISIS
+약 한꺼번에 먹고 그냥 잠들고 싶어	CRISIS
+세상에서 사라지고 싶어요	CRISIS
+스스로 목숨을 끊고 싶은 생각이 들어요	CRISIS
+숨 쉬는 것도 그만하고 싶어요	CRISIS
+아무도 나를 안 찾으니까 죽어 버릴까 봐요	CRISIS
+다 포기하고 뛰어내리고 싶어요	CRISIS
+사는 게 너무 고통스러워서 끝내고 싶어요	CRISIS
+나 자신을 해치고 싶은 충동이 들어요	CRISIS
+내일 아침에 눈을 안 떴으면 좋겠어요	CRISIS
+모든 걸 정리하고 떠나고 싶어요	CRISIS
+더는 살고 싶지 않아요	CRISIS
+지금 당장 죽고 싶은 마음뿐이에요	CRISIS
+# --- [4] 새 비명령 일상·상담 대화문 60개 (CHAT — 명령 오판 금지) ---
+그만 좀 하라고 했는데 아들이 계속 잔소리를 해요	CHAT
+운동을 처음부터 다시 시작하려니까 무릎이 시큰거려요	CHAT
+어제 손주가 카메라로 사진을 찍어 줬는데 참 잘 나왔어요	CHAT
+잠깐만 걸어도 숨이 차고 다리가 후들거려요	CHAT
+남편이 먼저 떠나고 나니까 집안이 너무 적막해요	CHAT
+밤에 자다가 화장실 가려고 깨면 다시 잠들기가 힘들어요	CHAT
+병원에서 혈압약을 바꿔 줬는데 속이 좀 쓰린 것 같아요	CHAT
+오늘 아침에는 미역국에 밥을 반 공기만 말아 먹었어요	CHAT
+네 시쯤에 경로당에 갔다가 친구들이랑 화투 치고 왔어요	CHAT
+아니요라고 말하고 싶었는데 며느리 눈치가 보여서 그냥 참았어요	CHAT
+날씨가 추워지니까 허리랑 어깨가 더 쑤시는 것 같아요	CHAT
+옛날에 살던 동네 생각이 나서 마음이 괜히 울적하네요	CHAT
+딸내미가 바쁜지 이번 주말에는 못 온다고 연락이 왔어요	CHAT
+텔레비전을 켜 놔도 재미있는 게 하나도 없어요	CHAT
+시장에 가서 시금치랑 두부를 사 오다가 다리가 아파서 쉬었어요	CHAT
+귀가 점점 어두워져서 남들이 하는 말을 잘 못 알아듣겠어요	CHAT
+젊었을 때는 산에도 잘 다녔는데 이제는 계단 오르기도 겁나요	CHAT
+이웃집 할머니가 병원에 입원하셨다는 소식을 듣고 마음이 안 좋았어요	CHAT
+약을 먹었는지 안 먹었는지 자꾸 깜빡깜빡해서 걱정이에요	CHAT
+창밖을 보니까 단풍이 예쁘게 들었는데 같이 구경 갈 사람이 없네요	CHAT
+소화가 잘 안 돼서 점심은 죽으로 조금만 먹었어요	CHAT
+손주 녀석이 대학교에 합격했다고 전화가 와서 기분이 좋았어요	CHAT
+요즘은 입맛이 없어서 반찬을 만들어 놓아도 그대로 남아요	CHAT
+비 오는 날이면 무릎 관절이 콕콕 쑤셔서 밖에 나가기가 싫어요	CHAT
+복지관 노래교실이 다음 주부터 다시 시작한다고 해서 기대돼요	CHAT
+버스 타러 나갔다가 넘어질 뻔해서 가슴이 철렁했어요	CHAT
+집에만 가만히 앉아 있으니까 생각만 많아지고 한숨이 나와요	CHAT
+아침에 일어났더니 머리가 띵하고 어지러워서 한참 누워 있었어요	CHAT
+자식들한테 짐이 되는 것 같아서 아파도 말하기가 미안해요	CHAT
+혼자 밥 차려 먹는 게 귀찮아서 그냥 빵이랑 우유로 때웠어요	CHAT
+지난번에 찍은 엑스레이 결과는 별일 없다고 해서 다행이에요	CHAT
+안경을 어디다 뒀는지 한참 찾았는데 식탁 위에 있더라고요	CHAT
+동네 한 바퀴 산책하고 나니까 기분이 한결 상쾌해졌어요	CHAT
+밤마다 다리에 쥐가 나서 잠을 설칠 때가 많아요	CHAT
+예전에 키우던 강아지가 자꾸 생각나서 사진첩을 꺼내 봤어요	CHAT
+오늘 점심에는 경로당에서 국수를 삶아 줘서 맛있게 먹었어요	CHAT
+휴대폰 글씨가 너무 작아서 문자 읽기가 참 불편해요	CHAT
+찬 바람을 쐬었더니 기침이 자꾸 나고 목이 칼칼해요	CHAT
+우리 영감 살아 있을 때 같이 온천 여행 갔던 게 그립네요	CHAT
+혈당 수치가 조금 내려갔다고 의사 선생님이 칭찬해 주셨어요	CHAT
+저녁 먹고 나서 따뜻한 보리차를 한 잔 마셨더니 속이 편해요	CHAT
+요즘 뉴스를 보면 세상 돌아가는 게 무서워서 마음이 불안해요	CHAT
+손목이 시큰거려서 김장할 때 배추 절이기가 힘들 것 같아요	CHAT
+친구한테 먼저 전화해 볼까 하다가 바쁠까 봐 그만뒀어요	CHAT
+오늘 낮에는 햇볕이 따뜻해서 베란다에 이불을 널어 말렸어요	CHAT
+치과에 가야 하는데 비용이 많이 나올까 봐 망설여져요	CHAT
+며칠째 변비가 있어서 배가 더부룩하고 답답해요	CHAT
+할아버지가 화분에 물 주는 걸 잊어버려서 꽃이 시들었어요	CHAT
+라디오에서 옛날 유행가가 나오길래 따라 불러 봤어요	CHAT
+나이가 들수록 시간이 왜 이렇게 빨리 지나가는지 모르겠어요	CHAT
+어제 꿈에 돌아가신 어머니가 나와서 아침부터 눈물이 났어요	CHAT
+노인정에서 친구랑 사소한 일로 말다툼을 해서 마음이 쓰여요	CHAT
+따뜻한 물로 목욕을 하고 나니까 몸이 노곤하고 잠이 솔솔 와요	CHAT
+은행 창구 직원이 친절하게 설명해 줘서 통장 정리를 잘 마쳤어요	CHAT
+집 앞 공원에 나갔더니 아이들이 뛰어노는 소리가 듣기 좋았어요	CHAT
+어깨가 결려서 파스를 붙였는데도 시원하게 풀리지가 않네요	CHAT
+오랜만에 고향 친구한테서 안부 전화가 와서 한참 수다를 떨었어요	CHAT
+저녁 반찬으로 고등어를 구웠는데 연기가 많이 나서 환기를 시켰어요	CHAT
+내일은 보건소에 가서 독감 예방주사를 맞으려고 해요	CHAT
+내 이야기를 이렇게 차분하게 들어 주니까 마음이 참 든든해요	CHAT
