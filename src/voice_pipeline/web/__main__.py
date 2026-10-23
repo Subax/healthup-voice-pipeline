@@ -44,6 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-barge-filter", action="store_true", help="말하는 중 맞장구 판별을 끄고 어떤 소리든 끊는다")
     ap.add_argument("--no-emotion-hint", action="store_true", help="감정 태그를 LLM 어조 지시로 쓰지 않는다")
     ap.add_argument("--no-intent", action="store_true", help="음성 명령 의도 분류를 끈다")
+    ap.add_argument("--wake", action=argparse.BooleanOptionalAction, default=True,
+                    help="대기 청취 (기본 켜짐, --no-wake로 끔)")
     ap.add_argument("--tls-cert", help="TLS 인증서(PEM). --tls-key와 함께 쓴다")
     ap.add_argument("--tls-key", help="TLS 개인키(PEM)")
     ap.add_argument("--auth-token", default=os.environ.get("DEMO_AUTH_TOKEN"),
@@ -69,10 +71,11 @@ def main() -> None:
                                  backchannel=not a.no_backchannel, endpoint=a.endpoint,
                                  speculate=not a.no_speculate, barge_filter=not a.no_barge_filter,
                                  emotion_hint=not a.no_emotion_hint, intent=not a.no_intent,
+                                 wake=a.wake,
                                  default_mode=a.default_mode, dev_log_days=a.dev_log_days),
                      auth_token=a.auth_token)
     scheme = "https" if tls else "http"
-    print(f"{scheme}://{a.host}:{a.port}/  (auth={'on' if a.auth_token else 'off'} llm={a.llm} tts={a.tts} stt={a.stt} default_mode={a.default_mode} first_min={a.first_min} vad_silence_ms={a.vad_silence_ms} backchannel={not a.no_backchannel} endpoint={a.endpoint} speculate={not a.no_speculate} barge_filter={not a.no_barge_filter} emotion_hint={not a.no_emotion_hint} intent={not a.no_intent})")
+    print(f"{scheme}://{a.host}:{a.port}/  (auth={'on' if a.auth_token else 'off'} llm={a.llm} tts={a.tts} stt={a.stt} default_mode={a.default_mode} first_min={a.first_min} vad_silence_ms={a.vad_silence_ms} backchannel={not a.no_backchannel} endpoint={a.endpoint} speculate={not a.no_speculate} barge_filter={not a.no_barge_filter} emotion_hint={not a.no_emotion_hint} intent={not a.no_intent} wake={a.wake})")
     web.run_app(app, host=a.host, port=a.port, ssl_context=ssl_ctx, print=None, access_log=None)  # 접속 로그를 끈다: 쿼리의 토큰이 남지 않게
 
 

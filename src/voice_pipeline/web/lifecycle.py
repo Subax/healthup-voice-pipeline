@@ -42,6 +42,7 @@ class SessionLifecycle:
         if initial_state not in VALID_STATES:
             raise ValueError(f"유효하지 않은 초기 세션 상태: {initial_state}")
         self._state = initial_state
+        self._prev_state: str = initial_state
         self._on_state_change = on_state_change
         self.pending_intent: str | None = None
         self.pending_payload: dict[str, Any] = {}
@@ -90,6 +91,8 @@ class SessionLifecycle:
 
     async def request_confirm(self, intent: str, payload: dict[str, Any] | None = None) -> None:
         """확인 대기 상태로 진입."""
+        if self._state != SessionState.CONFIRMING:
+            self._prev_state = self._state
         self.pending_intent = intent
         self.pending_payload = dict(payload or {})
         await self.transition_to(SessionState.CONFIRMING)
@@ -105,13 +108,14 @@ class SessionLifecycle:
         self.pending_intent = None
         self.pending_payload = {}
 
+        return_state = self._prev_state
         if confirmed:
             if self._state == SessionState.CONFIRMING:
-                await self.transition_to(SessionState.ACTIVE)
+                await self.transition_to(return_state)
             return intent, payload
         else:
             if self._state == SessionState.CONFIRMING:
-                await self.transition_to(SessionState.ACTIVE)
+                await self.transition_to(return_state)
             return None, {}
 
     async def close(self) -> None:

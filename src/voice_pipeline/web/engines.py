@@ -48,6 +48,7 @@ class Engines:
     barge_filter: bool = True        # 말하는 중 짧은 맞장구("네")로 답을 끊지 않는다
     emotion_hint: bool = True        # 감정 태그를 LLM 어조 지시(hint)로 쓴다
     intent: bool = True              # 음성 명령 의도 분류 켬/끔
+    wake: bool = True                # 대기 청취 (기본 켜짐)
     default_mode: str = "demo"       # 세션 기본 화면 모드: demo | dev
     dev_log_dir: Path | None = None  # 개발 로그 저장 디렉터리 (None이면 logs/dev)
     dev_log_days: int = 7            # 개발 로그 보존 일수 (기본 7일)
@@ -143,7 +144,8 @@ def _mock_reply(messages: list[dict]) -> str:
 def build_engines(llm: str = "mock", tts: str = "mock", stt: str = "mock", *,
                   first_min: int = 2, vad_silence_ms: int = 500, backchannel: bool = True,
                   endpoint: str = "smart", speculate: bool = True, barge_filter: bool = True,
-                  emotion_hint: bool = True, intent: bool = True, default_mode: str = "demo",
+                  emotion_hint: bool = True, intent: bool = True, wake: bool = True,
+                  default_mode: str = "demo",
                   dev_log_dir: Path | None = None, dev_log_days: int = 7,
                   prompt_bank: PromptBank | None = None) -> Engines:
     labels = {"llm": llm, "tts": tts, "stt": stt}
@@ -172,7 +174,7 @@ def build_engines(llm: str = "mock", tts: str = "mock", stt: str = "mock", *,
     eng = Engines(llm_o, tts_o, stt_o, make_vad, labels, first_min, vad_silence_ms,
                   BackchannelBank() if backchannel else None, endpoint_default=endpoint,
                   speculate=speculate, barge_filter=barge_filter, emotion_hint=emotion_hint,
-                  intent=intent, default_mode=default_mode, dev_log_dir=dev_log_dir,
+                  intent=intent, wake=wake, default_mode=default_mode, dev_log_dir=dev_log_dir,
                   dev_log_days=dev_log_days, prompt_bank=prompt_bank)
     if stt == "mock":
         from ..endpoint.smart_turn import MockEndpointScorer

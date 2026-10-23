@@ -86,15 +86,15 @@ async def check_1_demo_default(page, base_url: str) -> None:
 
 
 async def check_2_demo_onhello_hidden(page) -> None:
-    """2. 데모 모드 onHello 수신 뒤 헤더 숨김 유지 검사 (필수 1)."""
+    """2. 데모 모드 onHello 수신 뒤 헤더 숨김 유지 및 대기 힌트 검사 (필수 1)."""
     # 세션 시작 -> WS 연결 및 onHello 수신
     await page.click("#start")
     await asyncio.sleep(0.3)
 
-    # 실행 중 힌트 문구 확인 (권장 1)
+    # 실행 중 힌트 문구 확인: C4 wake=true 기본 상태 대기(idle) 힌트 확인
     running_hint = await page.text_content("#avatarHint")
     assert "상담" not in running_hint, f"실행 중 #avatarHint에 '상담' 포함: {running_hint}"
-    assert "대화 진행 중입니다" in running_hint, f"실행 중 #avatarHint 불일치: {running_hint}"
+    assert "마이크 대기 중" in running_hint, f"첫 실행 직후 #avatarHint 불일치 (대기 힌트 누락): {running_hint}"
 
     # onHello 수신 후 엔진 텍스트가 채워졌으나 데모 모드이므로 헤더 요소들은 숨김 유지 (필수 1)
     await page.wait_for_selector("#engines", state="attached")
@@ -253,9 +253,21 @@ async def check_7_avatar_touch_start(page) -> None:
         "() => document.getElementById('avatarCard').classList.contains('running')"
     ), "자리표시 카드 클릭 시 start()가 트리거되어 실행 상태가 되어야 함"
 
-    # 실행 중 힌트 확인 (권장 1)
-    hint_running = await page.text_content("#avatarHint")
-    assert "대화 진행 중입니다 (편하게 말씀하세요)" in hint_running, f"실행 중 힌트 불일치: {hint_running}"
+    # 첫 터치 직후 wake=true 기본 상태: "마이크 대기 중 ('시작하자'라고 말씀해 주세요)" 확인 (§16-2 4b)
+    hint_idle = await page.text_content("#avatarHint")
+    assert "마이크 대기 중" in hint_idle, f"첫 터치 직후 대기 힌트 불일치: {hint_idle}"
+
+    # 이미 실행 중인 상태에서 #avatarCard 재터치 -> session_start 전송 -> active 전환 ("대화 진행 중입니다")
+    await page.click("#avatarCard")
+    await asyncio.sleep(0.3)
+    hint_active = await page.text_content("#avatarHint")
+    assert "대화 진행 중입니다" in hint_active, f"재터치 세션 시작 후 active 힌트 불일치: {hint_active}"
+
+    # session_end 전송 -> 첫 터치 화면 재표시 없이 "마이크 대기 중" 복귀 확인
+    await page.evaluate("() => window.send({ type: 'session_end' })")
+    await asyncio.sleep(0.3)
+    hint_after_end = await page.text_content("#avatarHint")
+    assert "마이크 대기 중" in hint_after_end, f"세션 종료 후 마이크 대기 중 복귀 불일치: {hint_after_end}"
 
     # 중지 버튼 클릭 -> stopAll() 실행 및 권장 2 검사
     await page.click("#start")
@@ -265,7 +277,7 @@ async def check_7_avatar_touch_start(page) -> None:
     status_text = await page.text_content("#avatarStatusText")
     assert status_text == "중지됨", f"stopAll() 후 #avatarStatusText 불일치: {status_text}"
 
-    # 힌트 복구 확인
+    # 힌트 복구 확인 (미실행 초기 화면: "화면을 터치하여 대화를 시작하세요")
     hint_stopped = await page.text_content("#avatarHint")
     assert "화면을 터치하여 대화를 시작하세요" in hint_stopped, f"중지 후 힌트 불일치: {hint_stopped}"
 
@@ -485,6 +497,10 @@ async def check_11_dev_panel_b1(page) -> None:
 
     # 이전 메시지 및 지연 기록 리셋
     await page.click("#reset")
+    await asyncio.sleep(0.2)
+
+    # C1/C4 수명주기: 리셋 후 대화 세션 시작
+    await page.evaluate("() => window.ws.send(JSON.stringify({type: 'session_start', notice: false}))")
     await asyncio.sleep(0.2)
 
     async def wait_for_turn(expected_cnt: int, timeout: float = 6.0) -> None:

@@ -7,6 +7,7 @@ const DUCK_GAIN = 0.25;     // 사용자가 말하기 시작하면 낮추는 음
 let ws = null, ctx = null, master = null;
 let workletLoaded = false;
 let micStream = null, micNode = null, running = false;
+let currentSessionState = "idle";
 let cur = null;             // 현재 재생 중인 턴
 const deadTurns = new Set();
 let wantRun = false;        // 「시작」을 눌러 실행 중 (끊기면 재연결한다)
@@ -17,6 +18,7 @@ const turnEls = {};         // turn_id -> 말풍선
 const latRows = {};
 
 function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+window.send = send;
 
 // ---------- 모드 및 환경설정 (A2) ----------
 const DEFAULT_PREFS = {
@@ -286,6 +288,7 @@ function onInterrupt(m) {
 
 // ---------- 서버 메시지 ----------
 function onHello(m) {
+  if (m.session_state) currentSessionState = m.session_state;
   if (m.mode && !localStorage.getItem("healthup_mode")) {
     setMode(m.mode, false);
   }
@@ -308,6 +311,7 @@ function onHello(m) {
   $("epCard").hidden = true; epBadge = null; ep = null;
   if (m.backchannel != null) $("backchannel").checked = m.backchannel;
   applyVisibility();
+  updateAvatarHint();
 }
 
 function onMessage(ev) {
@@ -346,6 +350,8 @@ function onMessage(ev) {
       break;
     case "session_state":
       addMsg("dev", `[세션] 상태: ${m.state}`);
+      currentSessionState = m.state;
+      updateAvatarHint();
       break;
     case "backchannel_ignored": addMsg("alt", `맞장구로 보고 무시: ${m.text || "(소리)"}`); break;
     case "pong": if (typeof m.t === "number") $("rtt").textContent = `RTT ${Math.round(performance.now() - m.t)} ms`; break;
@@ -386,6 +392,8 @@ function onMessage(ev) {
       for (const k in latRows) delete latRows[k];
       for (const k in turnEls) delete turnEls[k];
       updateLatSummary();
+      currentSessionState = "idle";
+      updateAvatarHint();
       break;
     case "error": $("err").textContent = m.message; break;
   }
@@ -413,6 +421,9 @@ function connect() {
       barge_in: $("bargein").checked,
       backchannel: $("backchannel").checked
     });
+    if (!prefs.wake && currentSessionState === "idle") {
+      send({ type: "session_start" });
+    }
     lastState = "listening"; epBadge = null; setBadge();
   };
   ws.onclose = () => {
@@ -489,16 +500,29 @@ async function start() {
 
 setInterval(() => send({ type: "ping", t: performance.now() }), 2000);
 
+function updateAvatarHint() {
+  if (!$("avatarCard") || !$("avatarHint")) return;
+  $("avatarCard").classList.toggle("running", running);
+  if (!running) {
+    $("avatarHint").textContent = "화면을 터치하여 대화를 시작하세요";
+  } else if (currentSessionState === "idle") {
+    if (prefs.wake) {
+      $("avatarHint").textContent = "마이크 대기 중 ('시작하자'라고 말씀해 주세요)";
+    } else {
+      $("avatarHint").textContent = "대화가 종료되었습니다 (화면을 터치하여 대화를 시작하세요)";
+    }
+  } else {
+    $("avatarHint").textContent = "대화 진행 중입니다 (편하게 말씀하세요)";
+  }
+}
+
 function setRunning(on) {
   running = on;
   $("start").textContent = on ? "대화 중지" : "시작";
   $("start").classList.toggle("primary", !on);
   $("start").disabled = false;
   $("stopAnswer").disabled = !on;
-  if ($("avatarCard")) {
-    $("avatarCard").classList.toggle("running", on);
-    $("avatarHint").textContent = on ? "대화 진행 중입니다 (편하게 말씀하세요)" : "화면을 터치하여 대화를 시작하세요";
-  }
+  updateAvatarHint();
 }
 
 function stopAll() {
@@ -536,10 +560,12 @@ $("form").onsubmit = (e) => {
   send({ type: "text_input", text: t });
 };
 
-// 자리표시 카드 클릭 시 최초 시작
+// 자리표시 카드 클릭 시 최초 시작 또는 재시작 터치
 $("avatarCard").onclick = () => {
   if (!running) {
     start();
+  } else if (currentSessionState === "idle") {
+    send({ type: "session_start" });
   }
 };
 
@@ -556,6 +582,7 @@ $("prefWake").onchange = (e) => {
   prefs.wake = e.target.checked;
   savePrefs();
   send({ type: "config", wake: prefs.wake });
+  updateAvatarHint();
 };
 
 $("prefFace").onchange = (e) => {

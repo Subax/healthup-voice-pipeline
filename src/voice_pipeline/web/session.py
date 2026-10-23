@@ -53,6 +53,7 @@ from ..intent import (
     INTENT_UI_BADGE_TOGGLE,
     INTENT_WAKE_OFF,
     INTENT_WAKE_ON,
+    STATE_ALLOWED_INTENTS,
     classify_intent,
 )
 from ..pipeline import PendingTurn, VoicePipeline
@@ -86,6 +87,7 @@ AUTO_LABEL = "자동 (사용자 말투에 맞춤)"
 PAUSE_SILENCE_MS = 200   # smart 모드 VAD 최소 무음 (짧은 멈춤까지 알린다)
 RESUME_MERGE_MS = 1500   # 확정 직후 이 시간 안에 다시 말하면(본 응답 소리 전) 같은 턴으로 이어 붙인다
 PRE_ROLL_MS = 300        # VAD 구간 앞에 붙는 pre-roll. 말한 길이 = 구간 길이 - 이 값
+WAKE_MAX_SPEECH_MS = 2000  # 대기 상태에서 STT로 넘길 최대 발화 길이 (초과 시 무시)
 ENDPOINT_OPTIONS = [{"id": "smart", "label": "어미+운율 (Smart Turn·Kiwi)"},
                     {"id": "fixed", "label": "고정 무음 500ms"}]
 
@@ -168,17 +170,23 @@ class DemoSession:
         self.emotion_hint = bool(getattr(engines, "emotion_hint", True))
         self.intent_enabled = bool(getattr(engines, "intent", True))
         self.feature_prefs: dict[str, bool] = {
-            "wake": True,
+            "wake": bool(getattr(engines, "wake", True)),
             "face": False,
             "show_ai_notice": True,
             "show_camera_badge": True,
             "show_conn_status": True,
             "show_dev_info": False,
         }
+        self.wake_ignored_count: int = 0
         self._last_bot_text: str = ""
         self._speech_start_time: float | None = None
         self.prompt_bank = getattr(engines, "prompt_bank", None) or PromptBank()
-        self.lifecycle = SessionLifecycle(initial_state=SessionState.IDLE, on_state_change=self._on_lifecycle_change)
+        initial_lifecycle = (
+            SessionState.IDLE
+            if (getattr(engines, "prompt_bank", None) is not None and self.feature_prefs["wake"] and self.intent_enabled)
+            else SessionState.ACTIVE
+        )
+        self.lifecycle = SessionLifecycle(initial_state=initial_lifecycle, on_state_change=self._on_lifecycle_change)
         self._notice_played: bool = False
 
     def _next_utt(self) -> int:
@@ -220,7 +228,9 @@ class DemoSession:
                          "first_min": self.engines.first_min, "vad_silence_ms": self.engines.vad_silence_ms,
                          "voices": voices, "voice": voice,
                          "stt_options": self.engines.stt_options(), "stt": self.stt_id,
-                         "endpoint": self.endpoint_mode, "endpoint_options": ENDPOINT_OPTIONS})
+                         "endpoint": self.endpoint_mode, "endpoint_options": ENDPOINT_OPTIONS,
+                         "wake": self.feature_prefs.get("wake", True),
+                         "session_state": self.lifecycle.state})
 
     async def _on_lifecycle_change(self, old_state: str, new_state: str) -> None:
         await self.send({"type": "session_state", "state": new_state})
@@ -331,6 +341,8 @@ class DemoSession:
             if kind == "SpeechStart":
                 self._speech_start_time = time.monotonic()
                 await self.send({"type": "vad", "speaking": True})
+                if self.lifecycle.is_idle:
+                    continue
                 if self.endpoint_mode == "smart":
                     await self._maybe_reopen()
                 if self._busy():
@@ -341,12 +353,26 @@ class DemoSession:
                 if self.endpoint_mode == "smart":
                     await self.endpointer.on_speech_start()
             elif kind == "VoiceOnset":  # SpeechStart보다 빠른 신호: 대기 타이머만 멈춘다 (barge-in 아님)
+                if self.lifecycle.is_idle:
+                    continue
                 if self.endpoint_mode == "smart":
                     await self._maybe_reopen()
                     await self.endpointer.on_voice_onset()
             elif kind == "SpeechEnd":
                 await self.send({"type": "vad", "speaking": False})
                 now = time.monotonic()
+                if self.lifecycle.is_idle:
+                    if not self.feature_prefs.get("wake", True):
+                        continue
+                    dur_ms = max(0.0, len(ev.pcm16) / 32.0 - PRE_ROLL_MS)
+                    if dur_ms > WAKE_MAX_SPEECH_MS:
+                        log.debug("대기 중 발화 길이 초과로 무시: dur_ms=%.1f > %d", dur_ms, WAKE_MAX_SPEECH_MS)
+                        continue
+                    trace = TurnTrace(0)
+                    trace.mark(SPEECH_END, now)
+                    trace.mark(TURN_CONFIRMED, now)
+                    await self._start_turn(trace, pcm16=ev.pcm16)
+                    continue
                 if self._probe is not None:
                     if self._busy():
                         self._probe_end(ev.pcm16, now)   # STT로 맞장구인지 가른다 (백그라운드)
@@ -493,6 +519,8 @@ class DemoSession:
         응답·재생이 진행 중이면 선행하지 않는다 (barge-in 경로를 건드리지 않는다).
         """
         if self._closed or self.endpoint_mode != "smart":
+            return
+        if self.lifecycle.is_idle:
             return
         if self._busy() or (self._task is not None and not self._task.done()):
             return
@@ -902,23 +930,13 @@ class DemoSession:
                 stt_id, stt_ms = known.stt_id, known.stt_ms
                 emotion, event = getattr(known.last, "emotion", None), getattr(known.last, "event", None)
             elif pcm16 is not None:
-                self._last_pcm = pcm16
                 r = await self._stt().transcribe(pcm16)
                 text, stt_ms = (r.text or "").strip(), float(r.elapsed_ms)
                 emotion, event = getattr(r, "emotion", None), getattr(r, "event", None)
             trace.mark(STT_FINAL)
             if not text:
                 return
-            if spec is not None:   # 톤·맞장구는 선행 시작 때 이미 골랐다
-                tone, turn_id = spec.tone, spec.pt.turn_id
-            else:
-                tone = self._apply_tone(emotion, pcm16, text) if self._auto_active() else None
-                if known is not None and self._last_confirm is not None and self._last_confirm["turn"] is known:
-                    self._last_confirm["hl"] = len(self.pipeline.history)
-                turn_id = self.pipeline.guard.current + 1
-            await self.send({"type": "transcript", "utt_id": utt_id, "turn_id": turn_id,
-                             "text": text, "stt": stt_id, "stt_ms": round(stt_ms, 1),
-                             "emotion": emotion, "event": event, "tone": tone})
+
             t0_intent = time.monotonic()
             if self.intent_enabled:
                 ires = classify_intent(text, state=self.lifecycle.state)
@@ -932,6 +950,28 @@ class DemoSession:
                 rule = "disabled"
                 payload = {}
             classify_ms = round((time.monotonic() - t0_intent) * 1000.0, 2)
+
+            # 대기(idle) 상태 마이크 발화 게이트: 허용된 명령이 아니면 즉시 무기록 폐기 (통신비밀보호법 보호 장치)
+            if self.lifecycle.is_idle:
+                is_allowed_idle_command = (self.intent_enabled and ires.is_command and intent in STATE_ALLOWED_INTENTS["idle"])
+                if pcm16 is not None and not is_allowed_idle_command:
+                    self.wake_ignored_count += 1
+                    log.debug("대기 중 비명령 발화 무시 (무기록 폐기): 총 %d회", self.wake_ignored_count)
+                    return
+
+            if pcm16 is not None:
+                self._last_pcm = pcm16
+
+            if spec is not None:   # 톤·맞장구는 선행 시작 때 이미 골랐다
+                tone, turn_id = spec.tone, spec.pt.turn_id
+            else:
+                tone = self._apply_tone(emotion, pcm16, text) if self._auto_active() else None
+                if known is not None and self._last_confirm is not None and self._last_confirm["turn"] is known:
+                    self._last_confirm["hl"] = len(self.pipeline.history)
+                turn_id = self.pipeline.guard.current + 1
+            await self.send({"type": "transcript", "utt_id": utt_id, "turn_id": turn_id,
+                             "text": text, "stt": stt_id, "stt_ms": round(stt_ms, 1),
+                             "emotion": emotion, "event": event, "tone": tone})
             await self.send({
                 "type": "dev_event",
                 "event": "intent",
@@ -979,15 +1019,18 @@ class DemoSession:
                     await self.start_session(play_notice=True)
                     prompt_text = self.prompt_bank.get_text(PROMPT_NOTICE_AI) or ""
                     self._last_bot_text = prompt_text
-                    await self.send({"type": "session_state", "state": self.lifecycle.state})
                     await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": turn_id,
                                      "interrupted": False, "spoken_text": prompt_text, "trace": {"stt_ms": round(stt_ms, 1)}})
                     self._write_dev_record(utt_id, turn_id, text, stt_id, stt_ms, emotion, event, hint_rule,
                                            intent, grade, rule, classify_ms, prompt_text, prompt_text, False, {"stt_ms": round(stt_ms, 1)})
                     return
-                else:
+                elif pcm16 is None:
+                    # direct text_input 하위 호환
                     await self.lifecycle.start()
                     await self.send({"type": "session_state", "state": self.lifecycle.state})
+                else:
+                    # 기타 대기 중 허용된 명령은 아래 명령 처리 블록으로 이동
+                    pass
             else:
                 await self.send({"type": "session_state", "state": self.lifecycle.state})
 
