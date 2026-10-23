@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HealthUp 표정 모델 측정 페이지 (F1 Face Probe)</title>
+<style>
+:root {
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --fg: #1d2330;
+  --muted: #677084;
+  --line: #dfe3ea;
+  --accent: #2f6fed;
+  --accent-soft: rgba(47, 111, 237, 0.08);
+  --ok: #1f9d55;
+  --ok-soft: rgba(31, 157, 85, 0.1);
+  --warn: #d98a00;
+  --warn-soft: rgba(217, 138, 0, 0.1);
+  --bad: #d64545;
+  --bad-soft: rgba(214, 69, 69, 0.1);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171d;
+    --card: #1d222b;
+    --fg: #e6e9ef;
+    --muted: #8e97aa;
+    --line: #2d3441;
+    --accent: #6c9bff;
+    --accent-soft: rgba(108, 155, 255, 0.12);
+    --ok: #46c27d;
+    --ok-soft: rgba(70, 194, 125, 0.12);
+    --warn: #f0b13a;
+    --warn-soft: rgba(240, 177, 58, 0.12);
+    --bad: #f06a6a;
+    --bad-soft: rgba(240, 106, 106, 0.12);
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 system-ui, -apple-system, "Noto Sans KR", sans-serif;
+}
+main {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 16px;
+  display: grid;
+  gap: 16px;
+  grid-template-columns: 1fr 1fr;
+}
+header {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 12px;
+}
+h1 { font-size: 18px; margin: 0; display: flex; align-items: center; gap: 8px; }
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px;
+}
+.card h2 {
+  font-size: 13px;
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.wide { grid-column: 1 / -1; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.badge {
+  padding: 3px 10px;
+  border-radius: 99px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--line);
+  color: var(--fg);
+}
+.badge.dev { background: var(--warn-soft); color: var(--warn); border: 1px solid var(--warn); }
+.badge.ok { background: var(--ok-soft); color: var(--ok); border: 1px solid var(--ok); }
+.badge.bad { background: var(--bad-soft); color: var(--bad); border: 1px solid var(--bad); }
+.badge.info { background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent); }
+
+button {
+  font: inherit;
+  padding: 7px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--fg);
+  cursor: pointer;
+  font-weight: 500;
+  transition: all 0.15s ease;
+}
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+button.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+button.primary:hover:not(:disabled) { opacity: 0.9; }
+button.danger {
+  background: var(--bad-soft);
+  color: var(--bad);
+  border-color: var(--bad);
+}
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* 동의 안내 배너 (§4.4) */
+.consent-box {
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.consent-title { font-weight: 700; font-size: 14px; color: var(--accent); }
+.consent-text { font-size: 13px; color: var(--fg); margin: 0; line-height: 1.6; }
+.consent-actions { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+
+/* 비디오 및 캔버스 */
+.video-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  max-height: 280px;
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+video#cameraView {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scaleX(-1);
+}
+canvas#overlayCanvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  transform: scaleX(-1);
+  pointer-events: none;
+}
+.video-placeholder {
+  color: #888;
+  font-size: 13px;
+  text-align: center;
+  padding: 20px;
+}
+
+/* 감정 막대 시각화 */
+.bar-wrap { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.bar-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.bar-label { width: 70px; color: var(--muted); }
+.bar-track { flex: 1; height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
+.bar-fill { height: 100%; width: 0%; background: var(--accent); transition: width 0.08s ease; }
+.bar-val { width: 38px; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* 표 스타일 */
+table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; }
+tr.highlight { background: var(--accent-soft); font-weight: 600; }
+tr.highlight td { color: var(--accent); }
+
+/* 언더런 모니터 */
+.monitor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+}
+.metric-box {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+.metric-box .label { font-size: 11px; color: var(--muted); }
+.metric-box .value { font-size: 20px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.metric-box .value.ok { color: var(--ok); }
+.metric-box .value.warn { color: var(--warn); }
+.metric-box .value.bad { color: var(--bad); }
+
+/* 모델 다운로드 안내 상자 */
+.model-info-box {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.model-info-box code {
+  background: var(--card);
+  border: 1px solid var(--line);
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-family: ui-monospace, monospace;
+}
+
+@media (max-width: 760px) {
+  main { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>HealthUp 표정 모델 성능 계측 <span class="badge dev">F1 개발 전용</span></h1>
+      <span class="hint" style="color:var(--muted); font-size:12px;">
+        100% 브라우저 로컬 분석 | 서버 영상 프레임 전송 0 | 태블릿/PC 성능 계측
+      </span>
+    </div>
+    <div class="row">
+      <a href="/" style="color:var(--accent); text-decoration:none; font-size:13px; font-weight:500;">← 메인 대화 데모로 이동</a>
+    </div>
+  </header>
+
+  <!-- 1. 개인정보 및 카메라 동의 배너 (§4.4) -->
+  <div class="wide consent-box">
+    <div class="consent-title">📷 카메라 사용 동의 안내 (개인정보보호법·의료법 가이드 준수)</div>
+    <p class="consent-text">
+      <strong>카메라를 켜도 될까요?</strong> 표정으로 기분을 짐작해 대답에 참고합니다.<br>
+      영상은 저장하지 않으며 <strong>서버로 프레임이 전혀 전송되지 않습니다 (100% 브라우저 메모리 로컬 처리).</strong><br>
+      동의 버튼을 누르기 전에는 카메라 장치(<code>getUserMedia</code>)가 호출되지 않으며, 언제든 끄거나 철회할 수 있습니다.
+    </p>
+    <div class="consent-actions">
+      <button id="btnConsentOn" class="primary">✅ 동의하고 카메라 켜기</button>
+      <button id="btnConsentOff" class="danger" disabled>❌ 카메라 끄기</button>
+      <span id="cameraStatusBadge" class="badge">카메라 꺼짐</span>
+      <span id="netGuardBadge" class="badge ok">네트워크 영상 전송 0 바이트</span>
+    </div>
+  </div>
+
+  <!-- 2. 실시간 카메라 화면 & 표정 시각화 -->
+  <div class="card">
+    <h2>
+      <span>실시간 카메라 뷰</span>
+      <span id="camFpsText" style="font-size:11px; font-weight:normal; color:var(--muted);">- FPS</span>
+    </h2>
+    <div class="video-wrap">
+      <div id="videoPlaceholder" class="video-placeholder">
+        카메라가 꺼져 있습니다.<br>상단 동의 버튼을 누르면 화면이 표시됩니다.
+      </div>
+      <video id="cameraView" autoplay playsinline muted hidden></video>
+      <canvas id="overlayCanvas" hidden></canvas>
+    </div>
+    <div class="bar-wrap">
+      <div class="bar-row">
+        <span class="bar-label">대표 감정</span>
+        <strong id="topEmotionLabel" style="font-size:13px; min-width:80px;">-</strong>
+        <span id="topEmotionConf" class="bar-val">- %</span>
+      </div>
+      <div class="bar-row">
+        <span class="bar-label">미소(Smile)</span>
+        <div class="bar-track"><div id="barSmile" class="bar-fill"></div></div>
+        <span id="valSmile" class="bar-val">0.0</span>
+      </div>
+      <div class="bar-row">
+        <span class="bar-label">찡그림(Brow)</span>
+        <div class="bar-track"><div id="barBrow" class="bar-fill" style="background:var(--warn);"></div></div>
+        <span id="valBrow" class="bar-val">0.0</span>
+      </div>
+      <div class="bar-row">
+        <span class="bar-label">눈 깜빡임</span>
+        <div class="bar-track"><div id="barBlink" class="bar-fill" style="background:var(--ok);"></div></div>
+        <span id="valBlink" class="bar-val">0.0</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. 오디오 언더런 모니터 (§4.7 태블릿 CPU 부하 간섭 측정) -->
+  <div class="card">
+    <h2>
+      <span>오디오 언더런 모니터 (§4.7)</span>
+      <span class="badge info">Web Audio API</span>
+    </h2>
+    <p style="font-size:12px; color:var(--muted); margin:0 0 10px;">
+      표정 분석 모델의 CPU·WASM 부하가 음성 재생 스케줄러(<code>app.js</code> 언더런 임계 <code>t &lt; now + 5ms</code>)를 간섭하는지 실시간 감시합니다.
+    </p>
+    <div class="monitor-grid">
+      <div class="metric-box">
+        <div class="label">오디오 언더런 발생</div>
+        <div id="underrunCount" class="value ok">0회</div>
+      </div>
+      <div class="metric-box">
+        <div class="label">스케줄러 지연</div>
+        <div id="schedulerJitter" class="value">0.0 ms</div>
+      </div>
+      <div class="metric-box">
+        <div class="label">오디오 컨텍스트 상태</div>
+        <div id="audioCtxState" class="value" style="font-size:15px;">대기</div>
+      </div>
+      <div class="metric-box">
+        <div class="label">측정 프레임 수</div>
+        <div id="benchFrameCount" class="value">0</div>
+      </div>
+    </div>
+    <div style="margin-top:10px;">
+      <label class="row" style="font-size:12px; color:var(--muted);">
+        <input type="checkbox" id="chkAudioMonitor" checked>
+        표정 측정 시 백그라운드 오디오 스케줄러 활성화 (태블릿 끊김 시험용)
+      </label>
+    </div>
+  </div>
+
+  <!-- 4. 모델 후보 및 계측 제어 패널 (§4.3) -->
+  <div class="wide card">
+    <h2>
+      <span>4.3절 표정 모델 후보 선택 및 벤치마크</span>
+      <span id="candidateBadge" class="badge">후보 선택됨</span>
+    </h2>
+    <div class="row" style="margin-bottom:12px;">
+      <label style="font-weight:600;">측정 대상 후보: </label>
+      <select id="selCandidate" style="font:inherit; padding:6px 10px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--fg);">
+        <option value="c1" selected>1. (추천) MediaPipe Face Landmarker (blendshape 52종)</option>
+        <option value="c2">2. MediaPipe Face Detector + FER+ ONNX (8종 감정)</option>
+        <option value="c3">3. face-api.js (7종 감정 확률)</option>
+      </select>
+
+      <label style="margin-left:12px; font-weight:600;">측정 프레임 수: </label>
+      <select id="selFrameCount" style="font:inherit; padding:6px 10px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--fg);">
+        <option value="30">30 프레임 (약 3~5초)</option>
+        <option value="50" selected>50 프레임 (약 5~10초)</option>
+        <option value="100">100 프레임 (약 10~20초)</option>
+      </select>
+
+      <label style="margin-left:12px; font-weight:600;">목표 분석 주기: </label>
+      <select id="selTargetInterval" style="font:inherit; padding:6px 10px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--fg);">
+        <option value="100" selected>100 ms (10 FPS)</option>
+        <option value="150">150 ms (6.7 FPS)</option>
+        <option value="200">200 ms (5 FPS)</option>
+      </select>
+    </div>
+
+    <div class="row" style="margin-bottom:12px;">
+      <button id="btnRunSingle" class="primary">▶ 선택 후보 측정 시작</button>
+      <button id="btnRunAll">▶ 후보 3종 일괄 순차 측정</button>
+      <button id="btnStopBench" disabled>⏹ 측정 중지</button>
+      <button id="btnDownloadReport" class="primary" style="margin-left:auto;">📥 결과 텍스트 내려받기 (.txt)</button>
+    </div>
+
+    <div id="benchProgressWrap" hidden style="margin-bottom:12px;">
+      <div class="row" style="justify-content:space-between; font-size:12px; margin-bottom:4px;">
+        <span id="benchProgressText">측정 준비 중...</span>
+        <span id="benchPercentText">0%</span>
+      </div>
+      <div class="bar-track" style="height:10px;"><div id="benchProgressBar" class="bar-fill" style="width:0%;"></div></div>
+    </div>
+
+    <!-- 후보별 측정 결과 요약 표 (§4.8 & §5 F1) -->
+    <table>
+      <thead>
+        <tr>
+          <th>후보 모델</th>
+          <th>로드 시간</th>
+          <th>추론 P50</th>
+          <th>추론 P90</th>
+          <th>평균 추론</th>
+          <th>실제 분석 주기</th>
+          <th>FPS</th>
+          <th>언더런 수</th>
+          <th>판정</th>
+        </tr>
+      </thead>
+      <tbody id="resultTableBody">
+        <tr id="row-c1">
+          <td><strong>1. MediaPipe Face Landmarker</strong></td>
+          <td id="c1-load">-</td>
+          <td id="c1-p50">-</td>
+          <td id="c1-p90">-</td>
+          <td id="c1-mean">-</td>
+          <td id="c1-interval">-</td>
+          <td id="c1-fps">-</td>
+          <td id="c1-underrun">-</td>
+          <td id="c1-status"><span class="badge">미측정</span></td>
+        </tr>
+        <tr id="row-c2">
+          <td><strong>2. Face Detector + FER+ ONNX</strong></td>
+          <td id="c2-load">-</td>
+          <td id="c2-p50">-</td>
+          <td id="c2-p90">-</td>
+          <td id="c2-mean">-</td>
+          <td id="c2-interval">-</td>
+          <td id="c2-fps">-</td>
+          <td id="c2-underrun">-</td>
+          <td id="c2-status"><span class="badge">미측정</span></td>
+        </tr>
+        <tr id="row-c3">
+          <td><strong>3. face-api.js 표정 모델</strong></td>
+          <td id="c3-load">-</td>
+          <td id="c3-p50">-</td>
+          <td id="c3-p90">-</td>
+          <td id="c3-mean">-</td>
+          <td id="c3-interval">-</td>
+          <td id="c3-fps">-</td>
+          <td id="c3-underrun">-</td>
+          <td id="c3-status"><span class="badge">미측정</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- 5. 모델 로컬 서빙 및 다운로드 정보 안내 상자 -->
+  <div class="wide model-info-box">
+    <strong>📦 모델 로컬 서빙 안내 (§4.3 전 구간 로컬 원칙):</strong><br>
+    본 페이지는 서버 및 외부 CDN으로 프레임을 유출하지 않으며, 로컬 <code>/static/models/</code>에 배치된 정적 모델 파일을 직접 로드하여 실행합니다.<br>
+    • <strong>후보 1 (추천)</strong>: <code>face_landmarker.task</code> (3.58 MB) + <code>vision_wasm_internal.wasm</code> (2.49 MB) → 합계 약 6.1 MB<br>
+    • <strong>후보 2</strong>: <code>version-RFB-320.onnx</code> (1.21 MB) + <code>emotion-ferplus-8.onnx</code> (33.42 MB) + <code>ort-wasm-simd.wasm</code> (2.33 MB) → 합계 약 37.1 MB<br>
+    • <strong>후보 3</strong>: <code>tiny_face_detector</code> (0.19 MB) + <code>face_expression_model</code> (0.33 MB) + <code>face-api.js</code> (0.26 MB) → 합계 약 0.8 MB<br>
+    <em>※ 로컬 파일이 아직 배치되지 않은 환경에서는 카메라 프레임 파이프라인(캔버스 획득·전처리·연산 부하)을 시뮬레이션하여 UI, 오디오 언더런, P50/P90 통계 및 결과 텍스트 저장을 검증합니다.</em>
+  </div>
+</main>
+
+<script src="/static/face-probe.js"></script>
+</body>
+</html>
