@@ -17,6 +17,7 @@ from .session import DemoSession
 
 ENGINES = web.AppKey("engines", Engines)
 AUTH_TOKEN = web.AppKey("auth_token", str)
+SESSIONS = web.AppKey("sessions", set)
 STATIC = Path(__file__).parent / "static"
 log = logging.getLogger("voice_pipeline.web")
 
@@ -53,6 +54,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
         except (OSError, AttributeError):
             pass
     session = DemoSession(ws, request.app[ENGINES])
+    request.app[SESSIONS].add(session)
     await session.send_hello()
     try:
         async for msg in ws:
@@ -65,6 +67,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
     except Exception:
         log.exception("세션 오류")
     finally:
+        request.app[SESSIONS].discard(session)
         await session.close()
     return ws
 
@@ -72,6 +75,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 def create_app(engines: Engines, *, warmup: bool = True, auth_token: str | None = None) -> web.Application:
     app = web.Application()
     app[ENGINES] = engines
+    app[SESSIONS] = set()
     if auth_token:
         app[AUTH_TOKEN] = auth_token
 

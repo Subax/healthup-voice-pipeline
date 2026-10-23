@@ -320,6 +320,15 @@ function onMessage(ev) {
         setMode(m.mode, false);
       }
       break;
+    case "config":
+      for (const k of ["wake", "face", "show_ai_notice", "show_camera_badge", "show_conn_status", "show_dev_info"]) {
+        if (k in m) {
+          prefs[k] = !!m[k];
+        }
+      }
+      savePrefs();
+      applyVisibility();
+      break;
     case "duck": if (ctx && master) master.gain.setTargetAtTime(m.on ? DUCK_GAIN : 1, ctx.currentTime, 0.03); break;
     case "dev_event":
       if (m.event === "duck") {

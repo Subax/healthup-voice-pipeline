@@ -31,6 +31,30 @@ from ..bridge.ws_server_sink import WebSocketServerSink
 from ..llm.events import LLMClient, LLMEvent, Token
 from ..barge_filter import PROBE_WINDOW_MS, is_backchannel
 from ..chunker import SemanticChunker
+from ..intent import (
+    GRADE_CONFIRM,
+    GRADE_DIALOG,
+    GRADE_IMMEDIATE,
+    INTENT_CAMERA_OFF,
+    INTENT_CAMERA_ON,
+    INTENT_CHAT,
+    INTENT_CONFIRM_NO,
+    INTENT_CONFIRM_YES,
+    INTENT_DEV_INFO_OFF,
+    INTENT_DEV_INFO_ON,
+    INTENT_MODE_DEMO,
+    INTENT_MODE_DEV,
+    INTENT_REDO_USER,
+    INTENT_REPEAT_BOT,
+    INTENT_RESET,
+    INTENT_SESSION_END,
+    INTENT_SESSION_START,
+    INTENT_STOP_SPEAKING,
+    INTENT_UI_BADGE_TOGGLE,
+    INTENT_WAKE_OFF,
+    INTENT_WAKE_ON,
+    classify_intent,
+)
 from ..pipeline import PendingTurn, VoicePipeline
 from ..prompts import (
     PROMPT_CONFIRM_CAMERA,
@@ -142,6 +166,16 @@ class DemoSession:
         self._last_pcm: bytes | None = None  # 마지막 마이크 발화 (다시 인식용)
         self.voice_auto = False             # 목소리 선택이 auto 인가. 기본은 끔: 감정 맞춤은 LLM 어조 지시(hint)로 한다
         self.emotion_hint = bool(getattr(engines, "emotion_hint", True))
+        self.intent_enabled = bool(getattr(engines, "intent", True))
+        self.feature_prefs: dict[str, bool] = {
+            "wake": True,
+            "face": False,
+            "show_ai_notice": True,
+            "show_camera_badge": True,
+            "show_conn_status": True,
+            "show_dev_info": False,
+        }
+        self._last_bot_text: str = ""
         self._speech_start_time: float | None = None
         self.prompt_bank = getattr(engines, "prompt_bank", None) or PromptBank()
         self.lifecycle = SessionLifecycle(initial_state=SessionState.IDLE, on_state_change=self._on_lifecycle_change)
@@ -352,6 +386,11 @@ class DemoSession:
                     self._clear_probe()
             if "backchannel" in msg:
                 self.backchannel_enabled = bool(msg["backchannel"]) and self.engines.backchannel is not None
+            if "intent" in msg:
+                self.intent_enabled = bool(msg["intent"])
+            for k in ("wake", "face", "show_ai_notice", "show_camera_badge", "show_conn_status", "show_dev_info"):
+                if k in msg:
+                    self.feature_prefs[k] = bool(msg[k])
             mode = msg.get("mode")
             if mode in ("demo", "dev"):
                 self.mode = mode
@@ -457,6 +496,11 @@ class DemoSession:
             return
         if self._busy() or (self._task is not None and not self._task.done()):
             return
+        if self.intent_enabled:
+            ires = classify_intent(text, state=self.lifecycle.state)
+            if ires.is_command:
+                log.debug("선행 생성 건너뜀 (명령 후보): text=%r intent=%s", text, ires.intent)
+                return
         await self._abort_spec()
         emotion, event = getattr(last, "emotion", None), getattr(last, "event", None)
         tone = self._apply_tone(emotion, pcm16, text) if self._auto_active() else None
@@ -554,6 +598,39 @@ class DemoSession:
             raise
         except Exception:
             log.exception("맞장구 판별 STT 오류: 끼어들기로 본다")
+
+        t_stt_done = time.monotonic()
+
+        # 확인 대기 상태: 맞장구 필터보다 확인 응답 판별을 먼저 한다 (§3.4-5)
+        if self.lifecycle.is_confirming:
+            await self._stop_current()
+            await self._duck(False)
+            trace = TurnTrace(0)
+            trace.mark(SPEECH_END, now)
+            trace.mark(TURN_CONFIRMED, now)
+            await self._start_turn(trace, pcm16=pcm, text=text)
+            return
+
+        # 말하는 중 정지 명령 (STOP_SPEAKING): 끊기만 하고 새 턴을 만들지 않는다 (§3.3-5)
+        if self.intent_enabled and text:
+            ires = classify_intent(text, state="speaking")
+            if ires.intent == INTENT_STOP_SPEAKING:
+                await self._stop_current()
+                await self._duck(False)
+                int_latency_ms = (time.monotonic() - t_stt_done) * 1000.0
+                log.debug("정지 명령 감지: text=%r, interrupt latency=%.2fms", text, int_latency_ms)
+                ev = {
+                    "type": "dev_event",
+                    "event": "barge_in",
+                    "result": "stop_command",
+                    "text": text,
+                    "dur_ms": round(dur_ms, 1),
+                    "int_latency_ms": round(int_latency_ms, 2),
+                }
+                self._barge_events.append(ev)
+                await self.send(ev)
+                return
+
         if text is not None and is_backchannel(text, dur_ms):
             log.debug("맞장구 무시: %r %.0fms", text, dur_ms)
             await self._duck(False)
@@ -595,8 +672,9 @@ class DemoSession:
         self._clear_probe()
         if self._spec is not None and self._spec is not keep_spec:
             await self._abort_spec()
+        curr = asyncio.current_task()
         t = self._task
-        running = t is not None and not t.done()
+        running = t is not None and not t.done() and t is not curr
         if running and self._stage == "stt":
             t.cancel()
         if (running and self._stage == "respond") or self.sink.active:
@@ -676,6 +754,144 @@ class DemoSession:
         self.engines.tts.voice = tone  # 엔진은 공유다. 탭 하나만 쓴다는 전제
         return tone
 
+    async def _play_confirm_prompt(self, intent: str, payload: dict[str, Any]) -> str:
+        if intent == INTENT_SESSION_END:
+            key = PROMPT_CONFIRM_END
+        elif intent == INTENT_RESET:
+            key = PROMPT_CONFIRM_RESET
+        elif intent in (INTENT_MODE_DEV, INTENT_MODE_DEMO):
+            key = PROMPT_CONFIRM_MODE
+        elif intent == INTENT_CAMERA_ON:
+            key = PROMPT_CONFIRM_CAMERA
+        elif intent == INTENT_UI_BADGE_TOGGLE and payload.get("target") == "show_ai_notice":
+            key = PROMPT_CONFIRM_HIDE_AI
+        else:
+            key = PROMPT_CONFIRM_MODE
+        await self.play_prompt(key)
+        return self.prompt_bank.get_text(key) or ""
+
+    async def _execute_confirmed_command(self, intent: str | None, payload: dict[str, Any], turn_id: int) -> str:
+        if not intent:
+            return ""
+        if intent == INTENT_SESSION_END:
+            await self.end_session(play_greeting=True)
+            return self.prompt_bank.get_text(PROMPT_GREETING_END) or ""
+        elif intent == INTENT_RESET:
+            self.pipeline.history.clear()
+            self._last_bot_text = ""
+            await self.lifecycle.reset()
+            await self.start_session(play_notice=True)
+            return self.prompt_bank.get_text(PROMPT_NOTICE_AI) or ""
+        elif intent == INTENT_MODE_DEV:
+            self.mode = "dev"
+            await self.send({"type": "mode_ready", "mode": self.mode})
+            return ""
+        elif intent == INTENT_MODE_DEMO:
+            self.mode = "demo"
+            await self.send({"type": "mode_ready", "mode": self.mode})
+            return ""
+        elif intent == INTENT_CAMERA_ON:
+            self.feature_prefs["face"] = True
+            await self.send({"type": "config", "face": True})
+            return ""
+        elif intent == INTENT_UI_BADGE_TOGGLE:
+            target = payload.get("target")
+            enabled = payload.get("enabled", True)
+            if target:
+                self.feature_prefs[target] = enabled
+                await self.send({"type": "config", target: enabled})
+            return ""
+        return ""
+
+    async def _execute_immediate_command(self, intent: str, payload: dict[str, Any], turn_id: int) -> str:
+        if intent == INTENT_STOP_SPEAKING:
+            await self._stop_current()
+            return ""
+        elif intent == INTENT_REPEAT_BOT:
+            if self._last_bot_text:
+                await self.pipeline.say(self._last_bot_text)
+                return self._last_bot_text
+            else:
+                await self.play_prompt(PROMPT_REDO_EMPTY)
+                return self.prompt_bank.get_text(PROMPT_REDO_EMPTY) or ""
+        elif intent == INTENT_REDO_USER:
+            if len(self.pipeline.history) >= 2:
+                self.pipeline.history.pop()  # assistant
+                self.pipeline.history.pop()  # user
+                self._last_bot_text = ""
+                await self.play_prompt(PROMPT_REDO_SUCCESS)
+                return self.prompt_bank.get_text(PROMPT_REDO_SUCCESS) or ""
+            else:
+                await self.play_prompt(PROMPT_REDO_EMPTY)
+                return self.prompt_bank.get_text(PROMPT_REDO_EMPTY) or ""
+        elif intent == INTENT_CAMERA_OFF:
+            self.feature_prefs["face"] = False
+            await self.send({"type": "config", "face": False})
+            return ""
+        elif intent == INTENT_WAKE_ON:
+            self.feature_prefs["wake"] = True
+            await self.send({"type": "config", "wake": True})
+            return ""
+        elif intent == INTENT_WAKE_OFF:
+            self.feature_prefs["wake"] = False
+            await self.send({"type": "config", "wake": False})
+            return ""
+        elif intent == INTENT_DEV_INFO_ON:
+            self.feature_prefs["show_dev_info"] = True
+            await self.send({"type": "config", "show_dev_info": True})
+            return ""
+        elif intent == INTENT_DEV_INFO_OFF:
+            self.feature_prefs["show_dev_info"] = False
+            await self.send({"type": "config", "show_dev_info": False})
+            return ""
+        elif intent == INTENT_UI_BADGE_TOGGLE:
+            target = payload.get("target")
+            enabled = payload.get("enabled", True)
+            if target:
+                self.feature_prefs[target] = enabled
+                await self.send({"type": "config", target: enabled})
+            return ""
+        elif intent == INTENT_SESSION_START:
+            await self.start_session(play_notice=True)
+            return self.prompt_bank.get_text(PROMPT_NOTICE_AI) or ""
+        return ""
+
+    def _write_dev_record(self, utt_id: int, turn_id: int, text: str, stt_id: str, stt_ms: float,
+                          emotion: str | None, event: str | None, hint_rule: str,
+                          intent: str, grade: str, rule: str, classify_ms: float,
+                          llm_text: str, spoken_text: str, interrupted: bool, turn_trace: dict) -> None:
+        if self.mode != "dev":
+            return
+        barge_list = list(self._barge_events)
+        self._barge_events.clear()
+        dev_record = {
+            "ts": datetime.now().isoformat(timespec="milliseconds"),
+            "session_id": self.session_id,
+            "utt_id": utt_id,
+            "turn_id": turn_id,
+            "mode": self.mode,
+            "transcript": text,
+            "stt_id": stt_id,
+            "stt_ms": round(stt_ms, 1),
+            "emotion": emotion,
+            "event": event,
+            "face": self._last_face_summary,
+            "hint_rule": hint_rule,
+            "intent": {
+                "intent": intent,
+                "grade": grade,
+                "rule": rule,
+                "classify_ms": classify_ms,
+            },
+            "llm_text": llm_text,
+            "spoken_text": spoken_text,
+            "interrupted": interrupted,
+            "trace": turn_trace,
+            "turn_eval_reason": self._last_turn_eval_reason,
+            "barge": barge_list,
+        }
+        self.dev_logger.write_turn(dev_record)
+
     async def _run_turn(self, trace: TurnTrace, pcm16: bytes | None, text: str | None, utt_id: int,
                         known: ConfirmedTurn | None = None, spec: _Spec | None = None) -> None:
         stt_ms, emotion, event = 0.0, None, None
@@ -703,18 +919,18 @@ class DemoSession:
             await self.send({"type": "transcript", "utt_id": utt_id, "turn_id": turn_id,
                              "text": text, "stt": stt_id, "stt_ms": round(stt_ms, 1),
                              "emotion": emotion, "event": event, "tone": tone})
-            if self.lifecycle.is_idle:
-                await self.lifecycle.start()
-            else:
-                await self.send({"type": "session_state", "state": self.lifecycle.state})
             t0_intent = time.monotonic()
-            intent = "TALK"
-            grade = "dialog"
-            rule = "default"
-            if text in ("그만", "멈춰", "잠깐만"):
-                intent = "STOP_SPEAKING"
-                grade = "immediate"
-                rule = "stop_exact"
+            if self.intent_enabled:
+                ires = classify_intent(text, state=self.lifecycle.state)
+                intent = ires.intent
+                grade = ires.grade
+                rule = ires.rule
+                payload = ires.payload
+            else:
+                intent = "TALK"
+                grade = GRADE_DIALOG
+                rule = "disabled"
+                payload = {}
             classify_ms = round((time.monotonic() - t0_intent) * 1000.0, 2)
             await self.send({
                 "type": "dev_event",
@@ -731,10 +947,77 @@ class DemoSession:
                 "rule": hint_rule,
                 "emotion": emotion,
             })
-            if spec is not None:   # transcript → assistant_delta → (commit) audio_begin 순서
+
+            # 1. 확인 대기 (confirming) 상태 처리
+            if self.lifecycle.is_confirming:
+                if intent == INTENT_CONFIRM_YES:
+                    pending_cmd, pld = await self.lifecycle.resolve_confirm(confirmed=True)
+                    spoken_text = await self._execute_confirmed_command(pending_cmd, pld, turn_id)
+                    if spoken_text:
+                        self._last_bot_text = spoken_text
+                    await self.send({"type": "session_state", "state": self.lifecycle.state})
+                    await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": turn_id,
+                                     "interrupted": False, "spoken_text": spoken_text or "", "trace": {"stt_ms": round(stt_ms, 1)}})
+                    self._write_dev_record(utt_id, turn_id, text, stt_id, stt_ms, emotion, event, hint_rule,
+                                           intent, grade, rule, classify_ms, spoken_text or "", spoken_text or "", False, {"stt_ms": round(stt_ms, 1)})
+                    return
+                elif intent == INTENT_CONFIRM_NO:
+                    await self.lifecycle.resolve_confirm(confirmed=False)
+                    await self.send({"type": "session_state", "state": self.lifecycle.state})
+                    await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": turn_id,
+                                     "interrupted": False, "spoken_text": "", "trace": {"stt_ms": round(stt_ms, 1)}})
+                    self._write_dev_record(utt_id, turn_id, text, stt_id, stt_ms, emotion, event, hint_rule,
+                                           intent, grade, rule, classify_ms, "", "", False, {"stt_ms": round(stt_ms, 1)})
+                    return
+                else:
+                    await self.lifecycle.resolve_confirm(confirmed=False)
+                    await self.send({"type": "session_state", "state": self.lifecycle.state})
+
+            # 2. 대기 (idle) 상태 처리
+            if self.lifecycle.is_idle:
+                if intent == INTENT_SESSION_START:
+                    await self.start_session(play_notice=True)
+                    prompt_text = self.prompt_bank.get_text(PROMPT_NOTICE_AI) or ""
+                    self._last_bot_text = prompt_text
+                    await self.send({"type": "session_state", "state": self.lifecycle.state})
+                    await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": turn_id,
+                                     "interrupted": False, "spoken_text": prompt_text, "trace": {"stt_ms": round(stt_ms, 1)}})
+                    self._write_dev_record(utt_id, turn_id, text, stt_id, stt_ms, emotion, event, hint_rule,
+                                           intent, grade, rule, classify_ms, prompt_text, prompt_text, False, {"stt_ms": round(stt_ms, 1)})
+                    return
+                else:
+                    await self.lifecycle.start()
+                    await self.send({"type": "session_state", "state": self.lifecycle.state})
+            else:
+                await self.send({"type": "session_state", "state": self.lifecycle.state})
+
+            # 3. 명령 처리 (is_command)
+            if self.intent_enabled and ires.is_command:
+                if grade == GRADE_CONFIRM:
+                    await self.lifecycle.request_confirm(intent, payload=payload)
+                    await self.send({"type": "session_state", "state": "confirming"})
+                    prompt_text = await self._play_confirm_prompt(intent, payload)
+                    self._last_bot_text = prompt_text
+                    await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": turn_id,
+                                     "interrupted": False, "spoken_text": prompt_text, "trace": {"stt_ms": round(stt_ms, 1)}})
+                    self._write_dev_record(utt_id, turn_id, text, stt_id, stt_ms, emotion, event, hint_rule,
+                                           intent, grade, rule, classify_ms, prompt_text, prompt_text, False, {"stt_ms": round(stt_ms, 1)})
+                    return
+                elif grade == GRADE_IMMEDIATE:
+                    spoken_text = await self._execute_immediate_command(intent, payload, turn_id)
+                    if spoken_text:
+                        self._last_bot_text = spoken_text
+                    await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": turn_id,
+                                     "interrupted": False, "spoken_text": spoken_text, "trace": {"stt_ms": round(stt_ms, 1)}})
+                    self._write_dev_record(utt_id, turn_id, text, stt_id, stt_ms, emotion, event, hint_rule,
+                                           intent, grade, rule, classify_ms, spoken_text, spoken_text, False, {"stt_ms": round(stt_ms, 1)})
+                    return
+
+            # 4. 일반 대화 (LLM 경로)
+            if spec is not None:
                 await self._release_spec_ui(spec)
                 self._stage = "respond"
-                if spec.pt.state == "aborted":   # 그 사이 끊겼다
+                if spec.pt.state == "aborted":
                     res = None
                 else:
                     log.debug("선행 결과 commit turn=%s", turn_id)
@@ -756,6 +1039,7 @@ class DemoSession:
                 interrupted = res.interrupted
                 spoken_text = res.spoken_text
                 turn_trace = {"stt_ms": round(stt_ms, 1), **self._trace_ms(res.trace)}
+
             await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": done_turn_id,
                              "interrupted": interrupted, "spoken_text": spoken_text,
                              "trace": turn_trace})
@@ -763,37 +1047,13 @@ class DemoSession:
             llm_text = self._turn_tokens.pop(done_turn_id, "")
             if not llm_text and spoken_text:
                 llm_text = spoken_text
-            barge_list = list(self._barge_events)
-            self._barge_events.clear()
+            if llm_text:
+                self._last_bot_text = llm_text
+            elif spoken_text:
+                self._last_bot_text = spoken_text
 
-            dev_record = {
-                "ts": datetime.now().isoformat(timespec="milliseconds"),
-                "session_id": self.session_id,
-                "utt_id": utt_id,
-                "turn_id": done_turn_id,
-                "mode": self.mode,
-                "transcript": text,
-                "stt_id": stt_id,
-                "stt_ms": round(stt_ms, 1),
-                "emotion": emotion,
-                "event": event,
-                "face": self._last_face_summary,
-                "hint_rule": hint_rule,
-                "intent": {
-                    "intent": intent,
-                    "grade": grade,
-                    "rule": rule,
-                    "classify_ms": classify_ms,
-                },
-                "llm_text": llm_text,
-                "spoken_text": spoken_text,
-                "interrupted": interrupted,
-                "trace": turn_trace,
-                "turn_eval_reason": self._last_turn_eval_reason,
-                "barge": barge_list,
-            }
-            if self.mode == "dev":
-                self.dev_logger.write_turn(dev_record)
+            self._write_dev_record(utt_id, done_turn_id, text, stt_id, stt_ms, emotion, event, hint_rule,
+                                   intent, grade, rule, classify_ms, llm_text, spoken_text, interrupted, turn_trace)
         except asyncio.CancelledError:
             raise
         except Exception as e:

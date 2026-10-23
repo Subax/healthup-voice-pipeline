@@ -87,7 +87,7 @@ async def test_short_backchannel_is_ignored_and_ducked(fixed):
 
 
 async def test_real_interruption_after_short_utterance_stops_answer():
-    c = make_client("잠깐만요")
+    c = make_client("저기요")
     await c.start_server()
     try:
         ws = await c.ws_connect("/ws")
