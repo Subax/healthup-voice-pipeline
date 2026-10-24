@@ -229,3 +229,62 @@ async def test_recorder_api_security_path_traversal(tmp_path: Path):
 
     finally:
         await client.close()
+
+
+def test_index_html_safari_fixes():
+    """Safari 대응: AudioContext resume, 업로드 재시도, 저장 후 자동 이동 및 레이스 컨디션 방지."""
+    from bench.d1_recorder import INDEX_HTML
+
+    assert "audioCtx.resume()" in INDEX_HTML
+    assert "uploadWithRetry" in INDEX_HTML
+    assert "currentIndex === savedIndex" in INDEX_HTML
+    assert "getAudioContext()" in INDEX_HTML
+    assert "isBusy" in INDEX_HTML
+    assert "isStarting" in INDEX_HTML
+    assert "e.repeat" in INDEX_HTML
+    assert "body.slice(0)" in INDEX_HTML
+
+
+@pytest.mark.asyncio
+async def test_recorder_cors_and_preflight(tmp_path: Path):
+    """Safari CORS 대응: OPTIONS 프리플라이트 및 CORS/Keep-Alive 헤더 검증."""
+    mini_tsv = tmp_path / "script.tsv"
+    mini_tsv.write_text("시작하자\tSESSION_START\t001_SESSION_START_1_r1.wav\t1\tidle\n", encoding="utf-8")
+    wav_dir = tmp_path / "wav_output"
+    wav_dir.mkdir()
+
+    app = create_app(mini_tsv, wav_dir)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    try:
+        # 1. /api/upload OPTIONS 프리플라이트 요청 -> 204 및 CORS 헤더
+        resp_opt = await client.options("/api/upload")
+        assert resp_opt.status == 204
+        assert resp_opt.headers.get("Access-Control-Allow-Origin") == "*"
+        assert "POST" in resp_opt.headers.get("Access-Control-Allow-Methods", "")
+        assert "Content-Type" in resp_opt.headers.get("Access-Control-Allow-Headers", "")
+
+        # 2. /api/items OPTIONS 프리플라이트 요청 -> 204 및 CORS 헤더
+        resp_opt_items = await client.options("/api/items")
+        assert resp_opt_items.status == 204
+        assert resp_opt_items.headers.get("Access-Control-Allow-Origin") == "*"
+
+        # 3. /api/upload POST 요청 응답에 CORS 및 Keep-Alive 헤더 포함 확인
+        valid_wav = _make_pcm16_wav(channels=1, sample_rate=16000, sampwidth=2)
+        resp_up = await client.post(
+            "/api/upload?filename=001_SESSION_START_1_r1.wav",
+            data=valid_wav,
+            headers={"Content-Type": "audio/wav"},
+        )
+        assert resp_up.status == 200
+        assert resp_up.headers.get("Access-Control-Allow-Origin") == "*"
+        assert "timeout=120" in resp_up.headers.get("Keep-Alive", "")
+
+        # 4. 400 Bad Request 에러 응답에도 CORS 헤더가 유지되는지 확인 (Safari 에러 차단 방지)
+        resp_err = await client.post("/api/upload?filename=invalid.wav", data=b"bad")
+        assert resp_err.status == 400
+        assert resp_err.headers.get("Access-Control-Allow-Origin") == "*"
+
+    finally:
+        await client.close()

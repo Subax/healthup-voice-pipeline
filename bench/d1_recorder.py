@@ -217,6 +217,8 @@ INDEX_HTML = """<!DOCTYPE html>
 let items = [];
 let currentIndex = 0;
 let isRecording = false;
+let isStarting = false;
+let isBusy = false;
 let audioCtx = null;
 let micStream = null;
 let processor = null;
@@ -292,13 +294,40 @@ function updateUI() {
   $("progressFill").style.width = pct + "%";
 }
 
+function getAudioContext() {
+  if (!audioCtx || audioCtx.state === "closed") {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    try {
+      audioCtx = new Ctx({ sampleRate: 16000 });
+    } catch (_) {
+      audioCtx = new Ctx();
+    }
+  }
+  return audioCtx;
+}
+
 async function startRecording() {
-  if (isRecording) return;
+  if (isRecording || isStarting || isBusy) return;
+  isStarting = true;
+  $("btnRecord").disabled = true;
+  $("btnRecord").innerHTML = "⏳ 마이크 연결 중...";
+  $("audioPlayer").pause();
+
   try {
+    // Safari: AudioContext는 사용자 제스처 동기 흐름 안에서 생성/resume()해야 오디오가 흐른다
+    audioCtx = getAudioContext();
+    if (audioCtx.state === "suspended") {
+      audioCtx.resume().catch(() => {});
+    }
+
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, sampleRate: 16000, echoCancellation: false, noiseSuppression: false }
     });
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+
+    if (audioCtx.state !== "running") {
+      await audioCtx.resume().catch(() => {});
+    }
+
     source = audioCtx.createMediaStreamSource(micStream);
     processor = audioCtx.createScriptProcessor(4096, 1, 1);
 
@@ -320,6 +349,8 @@ async function startRecording() {
     processor.connect(audioCtx.destination);
 
     isRecording = true;
+    isStarting = false;
+    $("btnRecord").disabled = false;
     recordingStartTime = Date.now();
     $("btnRecord").className = "btn-rec recording";
     $("btnRecord").innerHTML = "⏹️ 녹음 중지 & 저장 <span class='kbd'>Space</span>";
@@ -330,25 +361,58 @@ async function startRecording() {
       $("btnRecord").innerHTML = `⏹️ [${sec}초] 중지 & 저장 <span class='kbd'>Space</span>`;
     }, 100);
   } catch (err) {
+    isStarting = false;
+    isRecording = false;
+    $("btnRecord").disabled = false;
+    $("btnRecord").className = "btn-rec";
+    $("btnRecord").innerHTML = "⏺️ 녹음 시작 <span class='kbd'>Space</span>";
     alert("마이크 접근 실패: " + err.message);
   }
 }
 
+// Safari는 유휴 keep-alive 연결이 끊긴 뒤 첫 요청이 "Load failed"로 실패한다. 다시 시도한다
+async function uploadWithRetry(url, body, tries = 3) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const payload = (body instanceof ArrayBuffer) ? body.slice(0) : body;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "audio/wav" },
+        body: payload,
+        cache: "no-store"
+      });
+      return await res.json();
+    } catch (err) {
+      lastErr = err;
+      if (i < tries - 1) {
+        await new Promise(r => setTimeout(r, 200 * (i + 1)));
+      }
+    }
+  }
+  throw lastErr;
+}
+
 async function stopRecording() {
-  if (!isRecording) return;
+  if (!isRecording || isBusy) return;
   isRecording = false;
+  isBusy = true;
   clearInterval(timerInterval);
   $("meterFill").style.width = "0%";
   $("btnRecord").className = "btn-rec";
-  $("btnRecord").innerHTML = "⏺️ 녹음 시작 <span class='kbd'>Space</span>";
+  $("btnRecord").disabled = true;
+  $("btnRecord").innerHTML = "💾 저장 중...";
 
-  if (processor) processor.disconnect();
-  if (source) source.disconnect();
-  if (micStream) micStream.getTracks().forEach(t => t.stop());
+  if (processor) { processor.disconnect(); processor = null; }
+  if (source) { source.disconnect(); source = null; }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
 
   let totalLen = 0;
   for (const c of recordedChunks) totalLen += c.length;
   if (totalLen < 3200) { // 0.2초 미만 무효 처리
+    isBusy = false;
+    $("btnRecord").disabled = false;
+    $("btnRecord").innerHTML = "⏺️ 녹음 시작 <span class='kbd'>Space</span>";
     $("msgBar").textContent = "⚠️ 발화 길이가 너무 짧아(0.2초 미만) 저장하지 않았습니다.";
     return;
   }
@@ -361,20 +425,18 @@ async function stopRecording() {
   }
 
   // 16kHz 리샘플 (필요 시)
-  const actualSr = audioCtx.sampleRate;
+  const actualSr = audioCtx ? audioCtx.sampleRate : 16000;
   const pcm16 = (actualSr === 16000) ? merged : resampleLinear(merged, actualSr, 16000);
   const wavBlob = encodeWav16kMono(pcm16);
+  const arrayBuffer = await wavBlob.arrayBuffer();
 
+  const savedIndex = currentIndex;
   const it = items[currentIndex];
   $("msgBar").textContent = `저장 중: ${it.filename}...`;
 
   try {
-    const res = await fetch(`/api/upload?filename=${encodeURIComponent(it.filename)}`, {
-      method: "POST",
-      headers: { "Content-Type": "audio/wav" },
-      body: wavBlob
-    });
-    const data = await res.json();
+    const data = await uploadWithRetry(
+      `/api/upload?filename=${encodeURIComponent(it.filename)}`, arrayBuffer);
     if (data.ok) {
       it.exists = true;
       populateSelect();
@@ -382,16 +444,32 @@ async function stopRecording() {
       $("msgBar").textContent = `✅ 저장 완료: ${it.filename} (${(pcm16.length / 16000).toFixed(1)}초, ${Math.round(wavBlob.size / 1024)} KB)`;
 
       // 다음 항목으로 자동 이동
-      if (currentIndex < items.length - 1) {
+      if (currentIndex === savedIndex && currentIndex < items.length - 1) {
+        $("btnRecord").innerHTML = "⏭️ 다음 문장 이동 중...";
         setTimeout(() => {
-          currentIndex++;
-          updateUI();
+          if (currentIndex === savedIndex) {
+            currentIndex++;
+            updateUI();
+          }
+          isBusy = false;
+          $("btnRecord").disabled = false;
+          $("btnRecord").innerHTML = "⏺️ 녹음 시작 <span class='kbd'>Space</span>";
         }, 300);
+      } else {
+        isBusy = false;
+        $("btnRecord").disabled = false;
+        $("btnRecord").innerHTML = "⏺️ 녹음 시작 <span class='kbd'>Space</span>";
       }
     } else {
+      isBusy = false;
+      $("btnRecord").disabled = false;
+      $("btnRecord").innerHTML = "⏺️ 녹음 시작 <span class='kbd'>Space</span>";
       $("msgBar").textContent = `❌ 저장 실패: ${data.error || "알 수 없는 오류"}`;
     }
   } catch (err) {
+    isBusy = false;
+    $("btnRecord").disabled = false;
+    $("btnRecord").innerHTML = "⏺️ 녹음 시작 <span class='kbd'>Space</span>";
     $("msgBar").textContent = `❌ 업로드 네트워크 오류: ${err.message}`;
   }
 }
@@ -487,26 +565,43 @@ function findNextUnrecorded() {
   $("msgBar").textContent = "🎉 축하합니다! 200문장 모두 녹음이 완료되었습니다!";
 }
 
-$("btnRecord").onclick = () => isRecording ? stopRecording() : startRecording();
+$("btnRecord").onclick = () => {
+  if (isBusy || isStarting) return;
+  isRecording ? stopRecording() : startRecording();
+};
 $("btnPlay").onclick = playAudio;
 $("btnDelete").onclick = deleteAudio;
-$("btnPrev").onclick = () => { if (currentIndex > 0) { currentIndex--; updateUI(); } };
-$("btnNext").onclick = () => { if (currentIndex < items.length - 1) { currentIndex++; updateUI(); } };
-$("btnNextUnrecorded").onclick = findNextUnrecorded;
+$("btnPrev").onclick = () => {
+  if (isBusy || isRecording) return;
+  if (currentIndex > 0) { currentIndex--; updateUI(); }
+};
+$("btnNext").onclick = () => {
+  if (isBusy || isRecording) return;
+  if (currentIndex < items.length - 1) { currentIndex++; updateUI(); }
+};
+$("btnNextUnrecorded").onclick = () => {
+  if (isBusy || isRecording) return;
+  findNextUnrecorded();
+};
 
 window.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  if (e.repeat) return;
   if (e.code === "Space") {
     e.preventDefault();
+    if (isBusy || isStarting) return;
     isRecording ? stopRecording() : startRecording();
   } else if (e.code === "ArrowLeft") {
     e.preventDefault();
+    if (isBusy || isRecording) return;
     if (currentIndex > 0) { currentIndex--; updateUI(); }
   } else if (e.code === "ArrowRight") {
     e.preventDefault();
+    if (isBusy || isRecording) return;
     if (currentIndex < items.length - 1) { currentIndex++; updateUI(); }
   } else if (e.code === "KeyP") {
     e.preventDefault();
+    if (isBusy || isRecording) return;
     playAudio();
   }
 });
@@ -524,7 +619,21 @@ def create_app(script_path: Path, intent_wav_dir: Path) -> web.Application:
     cases = load_wav_script(script_path)
     allowed_filenames = {c.wav_filename for c in cases}
 
-    app = web.Application()
+    @web.middleware
+    async def cors_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
+        if request.method == "OPTIONS":
+            resp: web.StreamResponse = web.Response(status=204)
+        else:
+            try:
+                resp = await handler(request)
+            except web.HTTPException as ex:
+                resp = ex
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        return resp
+
+    app = web.Application(middlewares=[cors_middleware])
 
     async def handle_index(request: web.Request) -> web.Response:
         return web.Response(text=INDEX_HTML, content_type="text/html")
@@ -565,7 +674,10 @@ def create_app(script_path: Path, intent_wav_dir: Path) -> web.Application:
 
         target_path = intent_wav_dir / clean_name
         target_path.write_bytes(body)
-        return web.json_response({"ok": True, "filename": clean_name, "size": len(body)})
+        return web.json_response(
+            {"ok": True, "filename": clean_name, "size": len(body)},
+            headers={"Keep-Alive": "timeout=120"},
+        )
 
     async def handle_get_audio(request: web.Request) -> web.Response:
         filename = request.query.get("filename") or request.match_info.get("filename", "")
