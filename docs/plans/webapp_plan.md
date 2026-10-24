@@ -1,7 +1,7 @@
 # webapp_plan — HealthUp 웹 애플리케이션 완성 계획 (마감 2026-10-30)
 
 > 결론: 지금 웹 데모(`src/voice_pipeline/web/`)는 대화 경로가 이미 동작한다. 남은 일은 화면 2모드(개별 기능 토글 포함), 개발 로그, 음성 명령, 세션 시작·종료 흐름이다. 8일(10/23~10/30) 안에 1일 이하 작업 15개로 끝낸다. 얼굴 표정 감정은 동의 조건이 걸린 실험 작업으로 함께 진행한다.
-> 지금 할 일: 웹앱 계획 작업 **A1(`3a7dbcd`)·A2(`73cfbbf`)·B1(`abe1ec7`)·B2(`77e2fd7`)·C1(`5662652`)·C2(`0610ca6`)·C3(`cc1334c`)·C4(`7570ac4`)·F1(`64d9651`)·F2(`b229e02`)**까지 구현·검증·커밋 완료되었다. D2 지연 회귀 집계·판정 스크립트 `bench/d2_summarize.py`(`2ce83bc`, 사용법: `.venv/bin/python bench/d2_summarize.py <A_files> --mode-b <B_files>`)가 준비되었으며, D2 실측은 MediRA 5단계 종료 후 진행한다. 남은 작업(**D1·D1b·D2·D3·D4·F3·E1**)은 사용자(녹음/청취/태블릿 실기 평가) 또는 GPU 서비스 기동이 필요하다.
+> 지금 할 일: 웹앱 계획 작업 **A1(`3a7dbcd`)·A2(`73cfbbf`)·B1(`abe1ec7`)·B2(`77e2fd7`)·C1(`5662652`)·C2(`0610ca6`)·C3(`cc1334c`)·C4(`7570ac4`)·F1(`64d9651`)·F2(`b229e02`)**까지 구현·검증·커밋 완료되었다. D2 지연 회귀 집계·판정 스크립트 `bench/d2_summarize.py`(`2ce83bc`, 사용법: `.venv/bin/python bench/d2_summarize.py --mode-a <A_files> --mode-b <B_files>`)가 준비되었으며, D2 실측은 MediRA 5단계 종료 후 진행한다. 남은 작업(**D1·D1b·D2·D3·D4·F3·E1**)은 사용자(녹음/청취/태블릿 실기 평가) 또는 GPU 서비스 기동이 필요하다.
 >
 > - 작성: 2026-10-22. 사용자 결정 확정: **2026-10-23 02:42**. 코드는 고치지 않았다
 > - 근거: `docs/PLAN.md`, `docs/STATE.md`, `docs/LEGAL_REVIEW.md`, `docs/plans/next_0*.md`, `src/voice_pipeline/web/` 전체, `Claude/docs/STATE.md`
