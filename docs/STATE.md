@@ -1,9 +1,9 @@
 # STATE — 모듈별 개발 현황
 
-> 결론: 웹 데모에서 마이크 → STT → 턴 종료 → LLM → TTS → 재생이 동작한다. 2026-10-21에 목표가 바뀌었다: 데모 마감 11/27, 태블릿 브라우저에서 지연 단축. Unreal·립싱크는 이번 범위가 아니다. 이어서 2026-10-22에 **10/30 마감 웹 애플리케이션 완성 계획(`docs/plans/webapp_plan.md`: 화면 2모드·개별 기능 토글·개발 로그·음성 명령·세션 흐름)**이 시작되어 **A1(`3a7dbcd`)·A2(`73cfbbf`)·B1(`abe1ec7`)·B2(`77e2fd7`)·C1(`5662652`)·C2(`0610ca6`)·C3(`cc1334c`)·F1(`64d9651`)이 완료**되었다.
-> 지금 할 일: 웹앱 계획 `C4`(대기 청취 `--wake` 및 `config.wake` 연동) 구현.
+> 결론: 웹 데모에서 마이크 → STT → 턴 종료 → LLM → TTS → 재생이 동작한다. 2026-10-21에 목표가 바뀌었다: 데모 마감 11/27, 태블릿 브라우저에서 지연 단축. Unreal·립싱크는 이번 범위가 아니다. 이어서 2026-10-22에 **10/30 마감 웹 애플리케이션 완성 계획(`docs/plans/webapp_plan.md`: 화면 2모드·개별 기능 토글·개발 로그·음성 명령·세션 흐름)**이 시작되어 **A1(`3a7dbcd`)·A2(`73cfbbf`)·B1(`abe1ec7`)·B2(`77e2fd7`)·C1(`5662652`)·C2(`0610ca6`)·C3(`cc1334c`)·C4(`7570ac4`)·F1(`64d9651`)이 완료**되었다. D1 녹음기 수정(`5ef4482`: Safari 업로드 재시도, 한 번 녹음 후 자동 이동) 반영.
+> 지금 할 일: D1 음성 명령 녹음 진행 및 F1 표정 모델 브라우저 측정.
 >
-> - 기준: git `main` @ `64d9651` (2026-10-23), 테스트 289개 통과 (`.venv/bin/python -m pytest`), `bench/web_ui_check.py` 11/11 통과
+> - 기준: git `main` @ `5ef4482` (2026-10-24), 테스트 296개 통과 (`.venv/bin/python -m pytest`), `bench/web_ui_check.py` 11/11 통과
 > - 정리 방식: 모듈마다 「현재 상태」와 「연혁」(오래된 것이 위)을 둔다
 > - 세션별 기록은 `Claude/docs/STATE.md`에 있다. 이 문서는 그 기록과 git 이력을 모듈 기준으로 다시 묶은 것이다
 > - 수치는 개발 장비(AI TOP ATOM, GB10) 값이다. 최종 수치가 아니다
@@ -210,6 +210,7 @@
 | 2026-10-21 | `d2805cd` | 끄개 `--no-speculate` `--no-barge-filter` `--no-emotion-hint` |
 | 2026-10-23 | `3a7dbcd` | `webapp` **A1 완료**: 서버 모드 상태(`demo`/`dev`), `--default-mode`(기본 `demo`), `hello.mode`, `config.mode` 전환 및 `mode_ready` 응답 (`tests/test_web_modes.py` 3개 통과) |
 | 2026-10-23 | `73cfbbf` | `webapp` **A2 완료**: 화면 2모드(자리표시 영역 터치 시작, `AI 마음 건강 도우미` 고지·카메라/마이크 대기 배지·연결 상태), 접이식 `⚙️ 설정` 패널(개별 토글 6종 `wake`·`face`·`show_ai_notice`·`show_camera_badge`·`show_conn_status`·`show_dev_info`), AI 고지 해제 시 법적 의무 경고 모달, `localStorage`·재연결 유지 (`bench/web_ui_check.py` 10/10 통과) |
+| 2026-10-24 | `7570ac4` | `webapp` **C4 완료**: 대기 청취(`--wake`) 마이크 게이트, 비명령 무기록 폐기 및 화면 상태 연동 (`tests/test_wake.py` 통과) |
 
 **현재 상태**: localhost에서 브라우저 마이크로 대화한다. 브라우저가 재생 주체다. 기본 모드는 `demo`(자리표시 화면 + 개별 설정 패널)이며 `dev` 모드 전환 시 전체 개발 패널이 열린다. `scripts/run_demo.sh` → http://localhost:8080/
 
@@ -233,6 +234,7 @@
 | 2026-10-21 | `d2805cd` | `web_e2e.py`가 `CHROME_PATH`를 받는다 |
 | 2026-10-22 | `2437f38` | `cosyvoice_cancel_lock_bench.py` (스트리밍 중단 직후 재요청 잠금 대기·TTFA·CER 측정) |
 | 2026-10-23 | `73cfbbf` | `web_ui_check.py` (Playwright 기반 데모/개발 모드·개별 기능 토글 6종·AI 고지 경고·재연결 유지 UI 검사 10개) |
+| 2026-10-24 | `5ef4482` | `bench/d1_recorder`: Safari 업로드 재시도, 한 번 녹음 후 자동 다음 이동, Space 반복 방지 (`tests/test_d1_recorder.py` 통과) |
 
 | 날짜 | 커밋 | 도구 |
 |---|---|---|
