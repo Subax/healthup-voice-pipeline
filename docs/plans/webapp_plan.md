@@ -1,7 +1,7 @@
 # webapp_plan — HealthUp 웹 애플리케이션 완성 계획 (마감 2026-10-30)
 
 > 결론: 지금 웹 데모(`src/voice_pipeline/web/`)는 대화 경로가 이미 동작한다. 남은 일은 화면 2모드(개별 기능 토글 포함), 개발 로그, 음성 명령, 세션 시작·종료 흐름이다. 8일(10/23~10/30) 안에 1일 이하 작업 15개로 끝낸다. 얼굴 표정 감정은 동의 조건이 걸린 실험 작업으로 함께 진행한다.
-> 지금 할 일: 웹앱 계획 작업 **A1(`3a7dbcd`)·A2(`73cfbbf`)·B1(`abe1ec7`)·B2(`77e2fd7`)·C1(`5662652`)·C2(`0610ca6`)·C3(`cc1334c`)·C4(`7570ac4`)·F1(`64d9651`)·F2(`b229e02`)**까지 구현·검증·커밋 완료되었다. 남은 작업(**D1·D1b·D2·D3·D4·F3·E1**)은 사용자(녹음/청취/태블릿 실기 평가) 또는 GPU 서비스 기동이 필요하다.
+> 지금 할 일: 웹앱 계획 작업 **A1(`3a7dbcd`)·A2(`73cfbbf`)·B1(`abe1ec7`)·B2(`77e2fd7`)·C1(`5662652`)·C2(`0610ca6`)·C3(`cc1334c`)·C4(`7570ac4`)·F1(`64d9651`)·F2(`b229e02`)**까지 구현·검증·커밋 완료되었다. D2 지연 회귀 집계·판정 스크립트 `bench/d2_summarize.py`(`2ce83bc`, 사용법: `.venv/bin/python bench/d2_summarize.py <A_files> --mode-b <B_files>`)가 준비되었으며, D2 실측은 MediRA 5단계 종료 후 진행한다. 남은 작업(**D1·D1b·D2·D3·D4·F3·E1**)은 사용자(녹음/청취/태블릿 실기 평가) 또는 GPU 서비스 기동이 필요하다.
 >
 > - 작성: 2026-10-22. 사용자 결정 확정: **2026-10-23 02:42**. 코드는 고치지 않았다
 > - 근거: `docs/PLAN.md`, `docs/STATE.md`, `docs/LEGAL_REVIEW.md`, `docs/plans/next_0*.md`, `src/voice_pipeline/web/` 전체, `Claude/docs/STATE.md`
@@ -301,7 +301,7 @@
 | D1b | 10/28 | D1 결과로 문형·표기 변형 보강 | `intent.py` | agy Gemini Flash (code) | D1 재실행에서 합격선 충족. C2 텍스트 세트 합격선 유지 | D1·C2 평가 재실행 | |
 | F1 | 10/27 | 표정 모델 측정 페이지 (개발 전용, 로컬 서빙, 프레임 전송 없음) | 신규 `web/static/face-probe.html`, `face-probe.js` | agy Gemini Flash (code) / 사용자 (카메라·태블릿) | 후보 3개의 추론 P50·P90, 분석 주기, 로드 시간, 언더런 수를 개발 PC·태블릿에서 기록. 결과 `bench/results/face_probe_20261027.txt`. 후보 1개 선정 | 브라우저에서 측정 페이지 실행 | ✅ (`64d9651`, 사용자 측정 대기) 📷📱 |
 | F2 | 10/28 | 표정 집계·동의(터치 버튼+음성)·서버 합침(`fused_hint`)·개별 토글(`face`) 연결, 개발 패널 표시 | `app.js`, `llm/hint.py`, `web/session.py` | agy Gemini Flash (code) | §4.6 표의 모든 조합 단위 시험 통과. 카메라 켬 1분 동안 브라우저 → 서버 바이너리 메시지가 모두 마이크 PCM 형식(영상 바이트 0). 동의 전 `getUserMedia({video})` 호출 0회. 데모 모드 기본 꺼짐(`face: false`) 및 개별 토글로 on/off 가능 | `tests/test_hint.py` 확장 + `bench/web_ui_check.py` (가짜 카메라 또는 모의 주입 훅) | ✅ (`b229e02`) |
-| D2 | 10/29 | 지연 회귀: 새 기능 켬(`--default-mode dev`·의도 분류) vs 끔(`--no-intent`) | `bench/web_e2e.py` (기존) | 설계·검토 창 / agy Gemini Flash | ABAB 교차 n=16씩. 본문 첫 오디오 P50 차이 ≤ +50ms, 턴 확정 P50 차이 ≤ +20ms. 기준선 P50 1798ms (`docs/STATE.md` §13) | `CHROME_PATH=<경로> <playwright-venv>/bin/python bench/web_e2e.py <4문장_16k.wav> 4` × 4회 × 2모드 | |
+| D2 | 10/29 | 지연 회귀: 새 기능 켬(`--default-mode dev`·의도 분류) vs 끔(`--no-intent`) | `bench/web_e2e.py`, 신규 `bench/d2_summarize.py` (`2ce83bc`) | 설계·검토 창 / agy Gemini Flash | ABAB 교차 n=16씩. 본문 첫 오디오 P50 차이 ≤ +50ms, 턴 확정 P50 차이 ≤ +20ms. 기준선 P50 1798ms (`docs/STATE.md` §13). 실측은 MediRA 5단계 종료 후 | `CHROME_PATH=<경로> <playwright-venv>/bin/python bench/web_e2e.py <4문장_16k.wav> 4` × 4회 × 2모드. 집계: `.venv/bin/python bench/d2_summarize.py --mode-a <A_files> --mode-b <B_files>` | ⏸️ (`2ce83bc` 준비 완료, 실측 대기) |
 | D3 | 10/29 | 태블릿 실기 | `scripts/gen_cert.sh`, `bench/net_probe.py` (기존) | 사용자 / 설계·검토 창 | 7개 확인: HTTPS 접속, 첫 터치 뒤 마이크, 음성 시작·종료, 음성 모드 전환, 데모 모드 개별 기능 토글(AI 고지 경고 포함), 재연결 뒤 모드·설정 유지, RTT P50 기록 | `https://<IP>:8080/?t=<토큰>` 시나리오 | 📱 |
 | D4 | 10/29 | 청취: AI 고지, 인사, 확인 질문, 재요청 문장. hint 있음/없음 응답 | `bench/tts_roundtrip.py` (기존) | 사용자 / 설계·검토 창 | 안내 문장 발음 오류 0건 (사용자 판정). 왕복 CER 기록 | 안내 WAV 저장 → 청취 → `tts_roundtrip.py` | 🎧 |
 | F3 | 10/29 | 표정 시험 (§4.8의 2~4) | — | 사용자 / 설계·검토 창 | 일치율 기록. 중립 20턴에서 R3 발생 ≤ 2/20. LLM 첫 토큰 차이 ≤ +20ms, 본문 첫 오디오 차이 ≤ +50ms, 언더런 증가 0 | 연기 시험 + ABAB | 📷🎧 |
