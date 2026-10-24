@@ -70,6 +70,10 @@ th { color:var(--muted); font-weight:600; }
 .summary-row { background:rgba(47,111,237,0.06); font-weight:600; }
 .summary-row th, .summary-row td { border-bottom:2px solid var(--line); color:var(--accent); }
 
+/* F2 동의 모달 */
+.modal-overlay { position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:1000; }
+.modal-card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; max-width:460px; box-shadow:0 8px 24px rgba(0,0,0,0.2); }
+
 @media (max-width:700px) { main { grid-template-columns:1fr; } }
 </style>
 </head>
@@ -155,6 +159,23 @@ th { color:var(--muted); font-weight:600; }
 
   <section class="card wide" id="logCard"><h2>대화</h2><div id="log"></div></section>
 
+  <!-- 얼굴 표정 분석 동의 모달 (§4.4) -->
+  <div id="faceConsentModal" class="modal-overlay" hidden>
+    <div class="modal-card">
+      <h3 style="margin:0 0 10px; font-size:16px;">📷 카메라 및 얼굴 표정 분석 동의</h3>
+      <p style="font-size:14px; line-height:1.6; margin:0 0 16px; color:var(--fg);">
+        카메라를 켜도 될까요?<br>
+        표정으로 기분을 짐작해 대답에 참고합니다.<br>
+        <strong>영상은 브라우저 메모리에서만 처리되며 저장하거나 서버로 전송하지 않습니다.</strong><br>
+        동의하지 않아도 음성 대화는 정상적으로 이용하실 수 있습니다.
+      </p>
+      <div class="row" style="justify-content:flex-end; gap:10px;">
+        <button id="btnFaceConsentReject">동의 안 함</button>
+        <button id="btnFaceConsentAgree" class="primary">동의하고 켜기</button>
+      </div>
+    </div>
+  </div>
+
   <section class="card wide" id="latCard">
     <h2>턴별 지연 (ms, 실제 발화 끝 기준 — 턴 종료 방식과 무관하게 같은 기준)</h2>
     <table>
@@ -175,6 +196,8 @@ th { color:var(--muted); font-weight:600; }
     </table>
   </section>
 </main>
+<video id="faceVideo" autoplay playsinline muted hidden style="display:none;"></video>
+<script src="/static/vendor/face-api/face-api.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

@@ -393,6 +393,9 @@
           } else if (this.cand.id === "c2") {
             // onnxruntime-web 초기화
             if (window.ort) {
+              if (window.ort.env && window.ort.env.wasm) {
+                window.ort.env.wasm.wasmPaths = "/static/vendor/onnxruntime-web/";
+              }
               this.modelInstance = await window.ort.InferenceSession.create("/static/models/emotion-ferplus-8.onnx", {
                 executionProviders: ["wasm"],
               });
@@ -757,6 +760,8 @@
   }
 
   // ---------- 7. 결과 텍스트 파일 생성 및 다운로드 (§5 F1) ----------
+  window.generateReportText = generateReportText;
+  window.benchmarkResults = benchmarkResults;
   btnDownloadReport.addEventListener("click", () => {
     const reportText = generateReportText();
     const dateStr = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);

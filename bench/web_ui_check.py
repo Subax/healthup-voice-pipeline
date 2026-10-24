@@ -322,6 +322,8 @@ async def check_8_pref_toggles_ui(page) -> None:
 
     # face=True, wake=True -> "카메라 켜짐 · 마이크 대기 중" 노출
     await page.click("#prefFace")  # ON
+    if await page.is_visible("#faceConsentModal"):
+        await page.click("#btnFaceConsentAgree")
     await asyncio.sleep(0.1)
     b_text2 = (await page.text_content("#cameraBadge")).strip()
     assert "카메라 켜짐" in b_text2 and "마이크 대기 중" in b_text2, f"face+wake 배지 불일치: {b_text2}"
@@ -618,6 +620,105 @@ async def check_11_dev_panel_b1(page) -> None:
     assert any("active" in m or "idle" in m for m in state_events), f"9) 세션 상태 내용 오류: {state_events}"
 
 
+async def check_12_face_consent_and_zero_video_bytes(page, binary_frames: list[int], ws_sent: list[str]) -> None:
+    """12. F2 표정 동의 모달, 동의 전 서버 config face:true 시 getUserMedia({video}) 0회, 영상 바이트 0 전송 검증."""
+    # 0. 동의 상태 초기화 (세션 단위 독립 검증 보장)
+    await page.evaluate("""() => {
+        sessionStorage.removeItem('healthup_face_consent');
+        localStorage.removeItem('healthup_face_consent');
+        if (typeof faceConsented !== 'undefined') faceConsented = false;
+        if (typeof stopCamera === 'function') stopCamera();
+        const modal = document.getElementById('faceConsentModal');
+        if (modal) modal.hidden = true;
+    }""")
+
+    # 1. 설정 패널 열기
+    if not await page.is_visible("#settingsPanel"):
+        await page.click("#settingsBtn")
+        await page.wait_for_selector("#settingsPanel:not([hidden])")
+
+    # 2. 초기 상태 확인: prefFace 체크 해제(기본 꺼짐), 동의 모달 hidden
+    assert not await page.is_checked("#prefFace"), "초기 상태에서 #prefFace는 꺼져 있어야 함"
+    assert not await page.is_visible("#faceConsentModal"), "초기 상태에서 #faceConsentModal은 숨겨져 있어야 함"
+
+    # 3. getUserMedia 추적 설치
+    await page.evaluate("""() => {
+        window._gumVideoCalls = 0;
+        window._gumAudioCalls = 0;
+        const origGum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+        navigator.mediaDevices.getUserMedia = async (constraints) => {
+            if (constraints && constraints.video) window._gumVideoCalls++;
+            if (constraints && constraints.audio) window._gumAudioCalls++;
+            return await origGum(constraints);
+        };
+    }""")
+
+    # 4. 동의 전 video getUserMedia 호출 수 0 확인
+    video_calls = await page.evaluate("() => window._gumVideoCalls")
+    assert video_calls == 0, f"동의 전 getUserMedia(video)가 호출됨: {video_calls}"
+
+    # 5. [핵심 검증 ①] 동의 전 서버 config에서 face:true 수신 시 -> 동의 모달만 띄우고 getUserMedia({video}) 0회 유지
+    await page.evaluate("""() => {
+        const fakeEv = { data: JSON.stringify({ type: 'config', face: true }) };
+        if (window.ws && typeof window.ws.onmessage === 'function') {
+            window.ws.onmessage(fakeEv);
+        }
+    }""")
+    await asyncio.sleep(0.2)
+
+    assert await page.is_visible("#faceConsentModal"), "동의 전 서버 config face:true 수신 시 동의 모달이 떠야 함"
+    assert not await page.is_checked("#prefFace"), "동의 전 서버 config face:true 시 #prefFace는 체크되지 않아야 함"
+    video_calls_after_config = await page.evaluate("() => window._gumVideoCalls")
+    assert video_calls_after_config == 0, f"동의 전 서버 config face:true 수신 시 getUserMedia(video)가 호출됨 ({video_calls_after_config}회)"
+
+    # 6. '동의 안 함' 클릭 시 모달 닫힘 및 체크박스 미체크 유지
+    await page.click("#btnFaceConsentReject")
+    await asyncio.sleep(0.2)
+    assert not await page.is_visible("#faceConsentModal"), "동의 안 함 클릭 시 모달이 닫혀야 함"
+    assert not await page.is_checked("#prefFace"), "동의 안 함 후 #prefFace는 꺼져 있어야 함"
+    video_calls = await page.evaluate("() => window._gumVideoCalls")
+    assert video_calls == 0, f"동의 거부 시 getUserMedia(video) 호출 0 유지 실패: {video_calls}"
+
+    # 7. UI 체크박스로 #prefFace 클릭 -> 동의 모달 노출 -> '동의하고 켜기' 클릭
+    await page.click("#prefFace")
+    await asyncio.sleep(0.2)
+    assert await page.is_visible("#faceConsentModal")
+    await page.click("#btnFaceConsentAgree")
+    await asyncio.sleep(0.5)
+
+    # 8. 동의 후: 모달 닫힘, #prefFace 체크됨, getUserMedia(video) 호출됨
+    assert not await page.is_visible("#faceConsentModal"), "동의 후 모달이 닫혀야 함"
+    assert await page.is_checked("#prefFace"), "동의 후 #prefFace가 켜져 있어야 함"
+    video_calls = await page.evaluate("() => window._gumVideoCalls")
+    assert video_calls >= 1, f"동의 후 getUserMedia(video)가 호출되어야 함: {video_calls}"
+
+    # 9. 카메라 배지 확인
+    badge_text = await page.text_content("#cameraBadge")
+    assert "카메라 켜짐" in badge_text, f"#cameraBadge에 '카메라 켜짐' 표시 누락: {badge_text}"
+
+    # 10. 발화 시뮬레이션 및 영상 바이트 전송 0 검증
+    binary_before = list(binary_frames)
+    await page.evaluate("() => window.sendPcm(10, 5)")
+    await asyncio.sleep(0.5)
+
+    # 새로 전송된 바이너리 프레임 확인
+    new_binary = binary_frames[len(binary_before):]
+    # 모든 바이너리 메시지는 오디오 PCM 크기(640 바이트)여야 함 (영상 프레임 바이트 0 전송)
+    for frame_size in new_binary:
+        assert frame_size == 640, f"바이너리 프레임이 마이크 PCM(640)이 아님 (영상 바이트 누출 의심): {frame_size}"
+
+    # 11. 모의 표정 요약 주입 훅 검증
+    await page.evaluate("() => window.injectFaceSummary({ label: 'SAD', conf: 0.9, coverage: 0.85, n_frames: 10 })")
+    await asyncio.sleep(0.3)
+
+    # 12. #prefFace 끄기 (정리)
+    await page.click("#prefFace")
+    await asyncio.sleep(0.2)
+    assert not await page.is_checked("#prefFace")
+    badge_text_after = await page.text_content("#cameraBadge")
+    assert "카메라 켜짐" not in badge_text_after, f"끄기 후 #cameraBadge에 '카메라 켜짐'이 남아있음: {badge_text_after}"
+
+
 async def main() -> None:
     port = 8795
     base_url = f"http://127.0.0.1:{port}"
@@ -641,6 +742,7 @@ async def main() -> None:
         ("9. 개별 토글 config 전송 (⑤)", lambda p: check_9_pref_config_frames(p, ws_sent)),
         ("10. 새로고침 유지 및 재연결 config (⑥, 필수 2)", lambda p: check_10_pref_reload_persistence(p, base_url, ws_sent)),
         ("11. B1 개발 패널 (3턴+끼어들기, 9종 표시, P50/P90)", check_11_dev_panel_b1),
+        ("12. F2 표정 동의 모달 및 영상 바이트 0 전송", lambda p: check_12_face_consent_and_zero_video_bytes(p, binary_frames_sent, ws_sent)),
     ]
 
     passed = 0
@@ -654,14 +756,16 @@ async def main() -> None:
                     "--autoplay-policy=no-user-gesture-required",
                 ],
             )
-            page = await browser.new_page()
+            context = await browser.new_context(permissions=["camera", "microphone"])
+            page = await context.new_page()
 
             ws_sent: list[str] = []
+            binary_frames_sent: list[int] = []
             page.on(
                 "websocket",
                 lambda ws: ws.on(
                     "framesent",
-                    lambda f: ws_sent.append(f) if isinstance(f, str) else None,
+                    lambda f: ws_sent.append(f) if isinstance(f, str) else binary_frames_sent.append(len(f)),
                 ),
             )
 

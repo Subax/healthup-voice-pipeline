@@ -17,3 +17,7 @@ services/cosyvoice/CosyVoice/
 심리상담 모델/
 certs/
 logs/
+
+# F1 브라우저 로컬 표정 모델 및 벤더 라이브러리
+src/voice_pipeline/web/static/models/
+src/voice_pipeline/web/static/vendor/

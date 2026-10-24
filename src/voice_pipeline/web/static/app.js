@@ -8,6 +8,12 @@ let ws = null, ctx = null, master = null;
 let workletLoaded = false;
 let micStream = null, micNode = null, running = false;
 let currentSessionState = "idle";
+let faceStream = null, faceIntervalId = null;
+let faceFrames = [];
+let totalSpeechFrames = 0;
+let faceConsented = !!sessionStorage.getItem("healthup_face_consent");
+let faceModelLoading = false;
+let faceModelFailed = false;
 let cur = null;             // 현재 재생 중인 턴
 const deadTurns = new Set();
 let wantRun = false;        // 「시작」을 눌러 실행 중 (끊기면 재연결한다)
@@ -35,6 +41,10 @@ let prefs = Object.assign({}, DEFAULT_PREFS);
 try {
   const saved = JSON.parse(localStorage.getItem("healthup_prefs") || "{}");
   Object.assign(prefs, saved);
+  // 세션 단위 동의(sessionStorage): 미동의 상태에서는 face 강제 false (§4.1, §4.4)
+  if (!faceConsented) {
+    prefs.face = false;
+  }
 } catch (e) {}
 
 function savePrefs() {
@@ -330,6 +340,27 @@ function onMessage(ev) {
           prefs[k] = !!m[k];
         }
       }
+      if (m.consent) {
+        faceConsented = true;
+        sessionStorage.setItem("healthup_face_consent", "true");
+        if ($("faceConsentModal")) $("faceConsentModal").hidden = true;
+      }
+      if (m.face != null) {
+        if (m.face) {
+          if (!faceConsented) {
+            prefs.face = false;
+            if ($("prefFace")) $("prefFace").checked = false;
+            if ($("faceConsentModal")) $("faceConsentModal").hidden = false;
+            send({ type: "config", face: false });
+          } else {
+            if ($("prefFace")) $("prefFace").checked = true;
+            startCamera();
+          }
+        } else {
+          stopCamera();
+          if ($("faceConsentModal")) $("faceConsentModal").hidden = true;
+        }
+      }
       savePrefs();
       applyVisibility();
       break;
@@ -345,7 +376,9 @@ function onMessage(ev) {
       } else if (m.event === "intent") {
         addMsg("dev", `[의도] ${m.intent} (등급: ${m.grade}, 규칙: ${m.rule}, ${m.classify_ms}ms)`);
       } else if (m.event === "hint") {
-        addMsg("dev", `[감정/hint] 규칙: ${m.rule}` + (m.emotion ? ` (감정: ${m.emotion})` : ""));
+        const emoStr = m.emotion ? ` (음성: ${m.emotion})` : "";
+        const faceStr = m.face ? ` (표정: ${m.face})` : "";
+        addMsg("dev", `[감정/hint] 규칙: ${m.rule}${emoStr}${faceStr}`);
       }
       break;
     case "session_state":
@@ -360,7 +393,45 @@ function onMessage(ev) {
     case "turn_eval": onTurnEval(m); break;
     case "endpoint_ready": $("endpoint").value = m.endpoint; epBadge = null; ep = null; $("epCard").hidden = true; setBadge(); break;
     case "avatar_state": epBadge = null; lastState = m.state; setBadge(); break;
-    case "vad": $("vad").classList.toggle("on", m.speaking); break;
+    case "vad":
+      $("vad").classList.toggle("on", m.speaking);
+      speakingLocal = !!m.speaking;
+      if (m.speaking) {
+        faceFrames = [];
+        totalSpeechFrames = 0;
+      } else {
+        if (prefs.face && !faceModelFailed && faceFrames.length > 0) {
+          const counts = {};
+          const confSums = {};
+          for (const f of faceFrames) {
+            const lbl = f.label || "NEUTRAL";
+            counts[lbl] = (counts[lbl] || 0) + 1;
+            confSums[lbl] = (confSums[lbl] || 0) + (f.conf || 0.8);
+          }
+          let dominant = "NEUTRAL";
+          let maxCount = 0;
+          for (const k in counts) {
+            if (counts[k] > maxCount) {
+              maxCount = counts[k];
+              dominant = k;
+            }
+          }
+          const avgConf = confSums[dominant] / maxCount;
+          const totalFrames = Math.max(totalSpeechFrames, faceFrames.length, 1);
+          const coverage = Math.min(1.0, maxCount / totalFrames);
+          send({
+            type: "face_summary",
+            label: dominant,
+            conf: Math.round(avgConf * 100) / 100,
+            coverage: Math.round(coverage * 100) / 100,
+            n_frames: faceFrames.length,
+            total_frames: totalFrames,
+          });
+        }
+        faceFrames = [];
+        totalSpeechFrames = 0;
+      }
+      break;
     case "transcript": addMsg("user", (m.utt_id != null ? `#${m.utt_id} ` : "") + m.text + (m.emotion || m.event ? `  [${[m.emotion, m.event].filter(Boolean).join(", ")}]` : "") +
       (m.stt ? `  [${m.stt} ${fmt(m.stt_ms)}ms]` : "") +
       (m.tone ? `  [톤 ${m.tone}]` : "")); break;
@@ -528,6 +599,7 @@ function setRunning(on) {
 function stopAll() {
   wantRun = false; clearTimeout(retryTimer); retryTimer = null;
   send({ type: "stop" });
+  stopCamera();
   if (cur && !cur.dead) { killTurn(cur, 40, false); speakingLocal = false; }
   if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
   if (micNode) { micNode.port.onmessage = null; micNode.disconnect(); micNode = null; }
@@ -542,6 +614,117 @@ function stopAll() {
     $("avatarStatusText").className = "avatar-status";
   }
 }
+
+// ---------- 얼굴 표정 카메라 및 모델 제어 (F2) ----------
+async function loadFaceModelIfNeeded() {
+  if (window.faceapi && !window.faceapi.nets.tinyFaceDetector.params && !faceModelLoading) {
+    try {
+      faceModelLoading = true;
+      await window.faceapi.nets.tinyFaceDetector.loadFromUri("/static/models/face-api");
+      await window.faceapi.nets.faceExpressionNet.loadFromUri("/static/models/face-api");
+      faceModelFailed = false;
+      addMsg("dev", "[표정 모델] face-api 로컬 모델 로드 완료");
+    } catch (e) {
+      faceModelFailed = true;
+      console.warn("face-api 모델 로드 실패:", e);
+      addMsg("dev", `[표정 모델] 모델 로드 실패: ${e.message || e} (표정 분석 비활성화)`);
+    } finally {
+      faceModelLoading = false;
+    }
+  }
+}
+
+async function startCamera() {
+  if (faceStream) return;
+  try {
+    const video = $("faceVideo");
+    faceStream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 640 }, height: { ideal: 480 } }
+    });
+    if (video) {
+      video.srcObject = faceStream;
+      video.play().catch(() => {});
+    }
+    loadFaceModelIfNeeded();
+    if (faceIntervalId) clearInterval(faceIntervalId);
+    faceIntervalId = setInterval(analyzeFaceFrame, 100);
+  } catch (err) {
+    console.warn("카메라 활성화 실패:", err);
+  }
+}
+
+function stopCamera() {
+  if (faceIntervalId) {
+    clearInterval(faceIntervalId);
+    faceIntervalId = null;
+  }
+  if (faceStream) {
+    faceStream.getTracks().forEach((t) => t.stop());
+    faceStream = null;
+  }
+  const video = $("faceVideo");
+  if (video) {
+    video.srcObject = null;
+  }
+  faceFrames = [];
+  totalSpeechFrames = 0;
+}
+
+async function analyzeFaceFrame() {
+  if (faceModelFailed) return;
+  if (speakingLocal) {
+    totalSpeechFrames++;
+  }
+  if (window._mockFaceEmotion && speakingLocal) {
+    faceFrames.push({ label: window._mockFaceEmotion, conf: window._mockFaceConf || 0.85 });
+    return;
+  }
+  const video = $("faceVideo");
+  if (!video || video.readyState < 2) return;
+  if (!speakingLocal) return;
+  try {
+    if (window.faceapi && window.faceapi.nets.tinyFaceDetector.params) {
+      const detection = await window.faceapi.detectSingleFace(video, new window.faceapi.TinyFaceDetectorOptions()).withFaceExpressions();
+      if (detection && detection.expressions) {
+        const sorted = detection.expressions.asSortedArray();
+        if (sorted.length > 0) {
+          faceFrames.push({
+            label: sorted[0].expression.toUpperCase(),
+            conf: Math.round(sorted[0].probability * 100) / 100
+          });
+        }
+      }
+    }
+  } catch (e) {
+    // 프레임 분석 오류 무시
+  }
+}
+
+function setFaceEnabled(enabled) {
+  prefs.face = enabled;
+  savePrefs();
+  send({ type: "config", face: prefs.face });
+  applyVisibility();
+  if (enabled) {
+    startCamera();
+  } else {
+    stopCamera();
+  }
+}
+
+window.injectFaceSummary = function(summary) {
+  send({
+    type: "face_summary",
+    label: summary.label || "HAPPY",
+    conf: summary.conf != null ? summary.conf : 0.9,
+    coverage: summary.coverage != null ? summary.coverage : 0.8,
+    n_frames: summary.n_frames != null ? summary.n_frames : 10
+  });
+};
+window.setMockFaceEmotion = function(label, conf) {
+  window._mockFaceEmotion = label;
+  window._mockFaceConf = conf;
+};
 
 // ---------- 이벤트 리스너 등록 ----------
 $("start").onclick = () => (running ? stopAll() : start());
@@ -586,10 +769,49 @@ $("prefWake").onchange = (e) => {
 };
 
 $("prefFace").onchange = (e) => {
-  prefs.face = e.target.checked;
-  savePrefs();
-  send({ type: "config", face: prefs.face });
+  if (e.target.checked) {
+    if (!faceConsented) {
+      $("prefFace").checked = false;
+      if ($("faceConsentModal")) $("faceConsentModal").hidden = false;
+    } else {
+      setFaceEnabled(true);
+    }
+  } else {
+    setFaceEnabled(false);
+  }
 };
+
+if ($("btnFaceConsentAgree")) {
+  $("btnFaceConsentAgree").onclick = () => {
+    faceConsented = true;
+    sessionStorage.setItem("healthup_face_consent", "true");
+    if ($("faceConsentModal")) $("faceConsentModal").hidden = true;
+    $("prefFace").checked = true;
+    setFaceEnabled(true);
+  };
+}
+
+if ($("btnFaceConsentReject")) {
+  $("btnFaceConsentReject").onclick = () => {
+    if ($("faceConsentModal")) $("faceConsentModal").hidden = true;
+    $("prefFace").checked = false;
+    setFaceEnabled(false);
+  };
+}
+
+if ($("faceConsentModal")) {
+  $("faceConsentModal").addEventListener("click", (e) => {
+    if (e.target === $("faceConsentModal")) {
+      if ($("btnFaceConsentReject")) $("btnFaceConsentReject").click();
+    }
+  });
+}
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $("faceConsentModal") && !$("faceConsentModal").hidden) {
+    if ($("btnFaceConsentReject")) $("btnFaceConsentReject").click();
+  }
+});
 
 $("prefAiNotice").onchange = (e) => {
   if (!e.target.checked) {

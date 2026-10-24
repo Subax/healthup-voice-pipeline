@@ -440,6 +440,18 @@ tr.highlight td { color: var(--accent); }
   </div>
 </main>
 
+<!-- 로컬 벤더 라이브러리 로드 (F1) -->
+<script src="/static/vendor/onnxruntime-web/ort.min.js"></script>
+<script src="/static/vendor/face-api/face-api.js"></script>
+<script type="module">
+  try {
+    const { FilesetResolver, FaceLandmarker } = await import("/static/vendor/tasks-vision/vision_bundle.mjs");
+    window.FilesetResolver = FilesetResolver;
+    window.FaceLandmarker = FaceLandmarker;
+  } catch (e) {
+    console.warn("tasks-vision 모듈 로드 실패:", e);
+  }
+</script>
 <script src="/static/face-probe.js"></script>
 </body>
 </html>

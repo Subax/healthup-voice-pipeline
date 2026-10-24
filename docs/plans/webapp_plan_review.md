@@ -701,6 +701,140 @@ git commit -m "webapp A2: 화면 2모드, 개별 기능 설정 패널(⚙️), A
      - 완료 후 .venv/bin/python -m pytest tests/test_wake.py 와 전체 .venv/bin/python -m pytest 통과를 확인하라.
 ```
 
+---
+
+## 16. C4 diff 검토 (2026-10-23, Opus 한도 소진으로 설계·검토 창 대행)
+
+### 16-1. 검토 항목 4건 상세 분석
+
+#### (1) `webapp_plan.md` §5 C4 통과 기준 5개와 `tests/test_wake.py` 1:1 대조
+
+직접 실행한 전체 테스트(`.venv/bin/python -m pytest`) 결과는 **`294 passed, 5 warnings in 146.00s`**이다. `tests/test_wake.py`의 시험 5개와 §5 C4 통과 기준 5개를 대조한 결과는 아래와 같다:
+
+| # | `webapp_plan.md` §5 C4 통과 기준 | `tests/test_wake.py` 대응 시험 함수 | 실제 동작 검증 여부 및 판정 |
+|---|---|---|---|
+| ① | 대기 중 비명령 5발화 → LLM 0회·`transcript` 메시지 0·로그 0줄 (`wake_ignored_count == 5`) | `test_idle_non_command_discarded_zero_llm_zero_transcript_zero_log` (`110~188`행) | **⚠️ 대부분 검증하나 누출 2건 미검출**: `default_mode="dev"`, `dev_log_dir=tmp_path`에서 비명령 발화(`"오늘 날씨 어때요"`, 600ms) 5회를 주입해 `llm.call_count == 0`, `transcript` 0개, JSONL 파일 0줄, `wake_ignored_count == 5`, `is_idle` 유지를 검증함. 그러나 아래 (4)항의 **`self._last_pcm` 메모리 잔류**와 **`log.debug` 원문 노출**, 그리고 `dev_event` 수신 0개 단언이 빠져 있음. |
+| ② | 상한(2000ms)보다 긴 발화 → STT 호출 0회 | `test_idle_duration_cap_exceeded_zero_stt_calls` (`192~234`행) | **✅ 실제로 검증함**: 135 loud + 6 quiet 프레임(총 2820ms, `dur_ms = 2820 - 300(PRE_ROLL_MS) = 2520ms > 2000ms`)을 주입해 `stt.transcribe_call_count == 0`, `llm.call_count == 0`, `is_idle` 유지를 확인함. |
+| ③ | `"시작하자"` → 진행(`active`) + 고지(`audio_begin`) | `test_idle_session_start_speech_starts_session_and_plays_notice` (`238~294`행) | **✅ 실제로 검증함**: 대기 상태에서 `"시작하자"` 발화(600ms) 주입 시 `session_state == "active"`, AI 고지 `audio_begin` 수신, `turn_done.spoken_text` 내 `"도우미"` 포함, `llm.call_count == 0`을 확인함. |
+| ④ | `config.wake=false` 전환 시 대기 중 STT 호출 0회 | `test_idle_wake_disabled_zero_stt` (`298~343`행) | **✅ 실제로 검증함**: `{"type": "config", "wake": False}` 전송 후 대기 상태 짧은 발화(600ms) 주입 시 `stt.transcribe_call_count == 0` 및 `is_idle` 유지를 확인함. (보완: CLI `--no-wake` 파서 및 `Engines(wake=False)` 초기 기동 시험도 추가 권장) |
+| ⑤ | 첫 터치 화면은 페이지당 1회 (대기 중 `"마이크 대기 중"` 표시 포함) | `test_first_touch_single_prompt_after_session_end` (`346~411`행) | **❌ 반쪽 검증 (정적 문자열 검사에 그쳐 실제 브라우저 UI 버그 누락)**: 프론트엔드는 `app.js` 파일 안에 `"마이크 대기 중 ('시작하자'라고 말씀해 주세요)"` 문자열이 있는지만 정적 검사(`353`행)하고 브라우저를 띄우지 않음. 그 결과 아래 **첫 터치 직후 화면에 `"마이크 대기 중"` 대신 `"대화 진행 중입니다 (편하게 말씀하세요)"`가 뜨는 UI 버그**(`app.js:521`)를 놓침. |
+
+- **기준 ⑤ 관련 `app.js` 실제 화면 버그 2건**:
+  1. **첫 터치 직후 대기(`idle`) 상태인데 `"대화 진행 중입니다"`가 표시되는 버그 (`app.js:521`, `session.py:222`)**:
+     - 사용자가 첫 터치(`#avatarCard` 또는 `#start` 클릭 → `start()`)를 하면 `setRunning(true)`(`app.js:521`)가 무조건 `$("avatarHint").textContent = "대화 진행 중입니다 (편하게 말씀하세요)"`로 설정한다.
+     - 반면 실제 서버(`build_engines`)는 `SessionState.IDLE`(대기) 상태에서 시작하며, `send_hello()`는 현재 세션 상태(`session_state`)를 내려주지 않는다.
+     - 따라서 **첫 터치 직후 서버는 대기(`idle`) 상태여서 비명령 발화를 전부 버리는데, 화면에는 `"마이크 대기 중 ('시작하자'라고 말씀해 주세요)"`가 아니라 `"대화 진행 중입니다 (편하게 말씀하세요)"`가 뜨는 상태 불일치**가 발생한다 (`"마이크 대기 중..."` 문구는 세션을 한 번 시작했다가 종료하거나 초기화를 눌렀을 때만 나타남).
+  2. **`wake=false` 상태에서 세션 종료(`idle`) 후 터치로 재시작할 수 없는 버그 (`app.js:354, 561`)**:
+     - `prefs.wake === false`일 때 세션이 종료(`idle`)되면 `"대화가 종료되었습니다 ('대화 시작' 버튼을 눌러주세요)"`라고 표시하지만, `running === true`인 동안 헤더의 `#start` 버튼은 `"대화 중지"`(`stopAll()`)이고 `#avatarCard.onclick`(`app.js:561`)은 `if (!running)` 조건에 막혀 아무 동작도 하지 않는다. 사용자가 `#start`를 누르면 마이크·오디오가 끊기면서 첫 터치 화면(`"화면을 터치하여 대화를 시작하세요"`)으로 돌아가 버려 **"첫 터치 화면은 페이지당 1회"** 원칙도 깨진다.
+
+---
+
+#### (2) `session.py:184`의 `initial_lifecycle` (`prompt_bank` 유무 분기) 타당성 판정
+
+```python
+# src/voice_pipeline/web/session.py:183-185
+self.prompt_bank = getattr(engines, "prompt_bank", None) or PromptBank()
+initial_lifecycle = SessionState.IDLE if getattr(engines, "prompt_bank", None) is not None else SessionState.ACTIVE
+self.lifecycle = SessionLifecycle(initial_state=initial_lifecycle, on_state_change=self._on_lifecycle_change)
+```
+
+- **판정: 기존 단위 시험(`test_web_demo.py`, `test_barge_probe.py`)을 수정 없이 통과시키기 위한 암묵적 우회(Hack)이며, 실제 서버의 `--no-wake`·`--no-intent` 기동 경로를 깨뜨리는 결함이 있다.**
+- **원인**:
+  - C1 이전에 작성된 `tests/test_web_demo.py`(마이크 발화 시험 6개)와 `tests/test_barge_probe.py`(`test_speech_while_idle_...` 1개)는 `Engines(...)`를 직접 생성하면서 `prompt_bank` 인자를 넘기지 않고(`prompt_bank=None`), WebSocket 연결 직후 `session_start` 없이 곧바로 마이크 PCM(`LOUD`)을 보낸다.
+  - 반면 실제 서버 기동 경로(`__main__.py` → `build_engines()`, `engines.py:152`)와 C1·C3·C4 시험은 `prompt_bank=PromptBank()`를 주입하므로 `initial_lifecycle = SessionState.IDLE`이 된다.
+- **실제 서버 기동 경로와의 충돌 (치명적 문제 2건)**:
+  1. **`--no-wake` 및 `--no-intent` 기동 시 마이크 입력 영구 먹통**:
+     - 실제 서버(`build_engines`)를 `--no-wake`(`wake=False`) 또는 `--no-intent`(`intent=False`, **D2 지연 회귀 벤치마크 필수 인자**)로 기동해도 `build_engines`가 `prompt_bank = PromptBank()`를 생성하므로 `initial_lifecycle`이 무조건 `SessionState.IDLE`이 된다.
+     - 이 상태에서 `--no-wake`이면 `on_mic`(`session.py:360`: `if not self.feature_prefs.get("wake", True): continue`)에서 모든 마이크 발화가 영구 무시되고, `--no-intent`이면 `_run_turn`(`session.py:952`: `is_allowed_idle_command = False`)에서 모든 마이크 발화가 비명령으로 영구 폐기된다. 즉 **작업 D2(`bench/web_e2e.py` + `--no-intent`) 실행 시 턴이 하나도 돌지 않고 100% 타임아웃 실패**한다.
+  2. **대기(`idle`) 상태에서 확인 등급 명령(`MODE_DEV`, `CAMERA_ON`, `UI_BADGE_TOGGLE`) 실행 후 상태 기계 오류 (`lifecycle.py:108-115`)**:
+     - 대기(`idle`) 상태에서 허용된 확인 명령(예: `"개발 모드로 바꿔 줘"`)을 말하면 `idle → confirming`으로 전이되는데, 이후 `"네"` 또는 `"아니요"`를 답해 `resolve_confirm()`이 호출되면 `lifecycle.py:110, 114`가 이전 상태(`idle`)가 아닌 **`SessionState.ACTIVE`로 무조건 전이**시켜 AI 법적 고지 재생도 없이 대화 세션이 강제 시작된다.
+
+---
+
+#### (3) `transcript` 전송을 의도 분류 뒤로 옮긴 것(`session.py:936-967`)의 지연·UI 순서 영향
+
+- **판정: 진행 중(`active`) 턴의 첫 오디오 지연(0ms 영향)과 UI 메시지 순서(100% 동일) 모두 악영향 없음 (타당한 변경).**
+- **근거**:
+  1. **진행 중 턴 첫 오디오 지연 영향 없음**:
+     - 비선행(`spec is None`) 경로에서 `pipeline.respond()`(`1074`행)는 변경 전에도 `transcript` 전송과 `classify_intent()`가 **모두 끝난 뒤** 호출되었다. 두 동기 구간(`{톤 결정 + transcript 전송}` ↔ `{classify_intent}`)의 순서만 바뀌었을 뿐 `pipeline.respond()` 시작 시각까지의 합산 시간은 동일하다.
+     - 선행 생성(`spec is not None`) 경로는 `_on_speculate`에서 이미 LLM·TTS가 시작되어 있으므로 `_run_turn` 내부 순서와 무관하다.
+     - `classify_intent()` 자체 지연이 실측 **P50 0.0028ms, P99 0.0057ms**이므로 `transcript` 메시지 전송 시각도 약 0.003ms(3µs) 차이뿐이다.
+  2. **UI 메시지 순서 100% 유지**:
+     - `classify_intent()`는 WebSocket 메시지를 보내지 않으므로 브라우저가 수신하는 메시지 순서는 변경 전후 모두 `(turn_eval) → transcript → dev_event(intent) → dev_event(hint) → session_state → audio_begin / assistant_delta → audio_end → turn_done`으로 완전히 같다.
+     - 오히려 대기(`idle`) 상태 비명령 발화일 때 `_apply_tone()` 및 `transcript` 전송 이전에 `return`할 수 있어, 비명령 발화로 인한 자동 목소리(`self.engines.tts.voice`) 오염과 전사 유출을 깔끔하게 막는다.
+
+---
+
+#### (4) 대기 중 비명령 발화가 로그·`dev_event`·파일에 정말 0건인지 점검
+
+- **판정: 파일(`logs/dev/*.jsonl`, `endpoint_log/*.jsonl`)과 WebSocket(`transcript`, `dev_event`, `turn_eval`)은 0건이 맞으나, 서버 로거(`log.debug`)와 세션 메모리(`self._last_pcm`)에 비명령 발화가 남는 누출 2건이 존재한다.**
+
+| 점검 경로 | 현재 결과 | 코드 위치 및 상세 확인 |
+|---|---|---|
+| 개발 로그 파일 (`logs/dev/*.jsonl`) | **✅ 0줄** | `session.py:956`에서 `_write_dev_record`(`882`행) 도달 전 `return` (`test_wake.py:176-180` 확인) |
+| 턴 종료 판단 로그 (`bench/results/endpoint_log/*.jsonl`) 및 `turn_eval` | **✅ 0줄 / 0건** | `session.py:359-370`에서 `is_idle`일 때 `TurnEndpointer.on_pause()`를 부르지 않고 직접 `_start_turn()` 호출 |
+| WebSocket `transcript` 및 `dev_event` (`intent`, `hint`, `duck`, `barge_in`) | **✅ 0건** | `SpeechStart`(`339`행)에서 `_probe_begin` 전 `continue`, `_run_turn`(`956`행)에서 `transcript`(`965`행)·`dev_event`(`968`행) 전 `return` |
+| **서버 Python 로거 (`log.debug`)** | **❌ 원문 노출 (`text=%r`)** | `session.py:955`: `log.debug("대기 중 비명령 발화 무시 (무기록 폐기): text=%r (총 %d회)", text, self.wake_ignored_count)` — 디버그 로그 활성화 시 **주변인의 비명령 발화 전사 원문(`text`)이 서버 로그에 그대로 기록**됨 (`webapp_plan.md` §3.5 "개수만 센다" 위반) |
+| **세션 메모리 `self._last_pcm` 및 `"다시 인식"`(`retranscribe`)** | **❌ 오디오 잔류·재전사 노출** | `session.py:928`: 대기(`idle`) 게이트(`951`행)를 통과하기 **전**에 `self._last_pcm = pcm16`을 먼저 저장함. 그 결과 대기 중 폐기된 주변인 음성 PCM 바이트가 `self._last_pcm`에 남아, 누군가 UI에서 `"다시 인식"`(`#retry`, `{"type": "retranscribe"}`)을 누르면 `_retranscribe()`(`489`행)가 폐기된 대기 음성을 다시 전사해 `retranscript` 메시지로 화면에 띄움 |
+
+---
+
+### 16-2. 최종 판정 및 `code` 창 수정 지시문
+
+- **최종 판정**: **수정 필요 (커밋 보류 — 위 누출 2건, `initial_lifecycle`의 `--no-wake`/`--no-intent` 먹통, `app.js` 첫 터치 후 `"마이크 대기 중"` 표시 누락 수정 후 커밋)**
+
+아래 지시문을 `code` 창에 전달하여 수정·검증한 뒤 커밋한다:
+
+```text
+[작업 지시: webapp C4 검토 지적 사항 5건 수정 후 커밋]
+
+docs/plans/webapp_plan_review.md §16 검토 결과를 반영해 아래 5곳을 수정하고 검증 후 C4를 커밋하라.
+
+1. 대기 중 비명령 발화 무기록 폐기 누출 2건 차단 (src/voice_pipeline/web/session.py):
+   (a) 928행의 `self._last_pcm = pcm16` 저장 위치를 956행 대기(idle) 게이트 통과 뒤로 옮겨라. 대기 중 무시된 비명령 발화(또는 빈 전사)의 오디오 바이트가 `self._last_pcm`에 남아 `retranscribe`("다시 인식")로 재전사·노출되지 않아야 한다.
+   (b) 955행 `log.debug`에서 `text=%r`를 제거하고 무시 횟수만 기록하라:
+       `log.debug("대기 중 비명령 발화 무시 (무기록 폐기): 총 %d회", self.wake_ignored_count)`
+   (c) 1012~1015행: `await self.start_session(play_notice=True)` 내부에서 `lifecycle.start()`가 이미 `_on_lifecycle_change` 콜백으로 `session_state: "active"`를 전송하므로, 1015행의 중복 `await self.send({"type": "session_state", ...})`는 제거하라.
+
+2. initial_lifecycle 조건 명확화 및 --no-wake / --no-intent 호환 보장 (src/voice_pipeline/web/session.py, src/voice_pipeline/web/lifecycle.py):
+   (a) `session.py:184`에서 `prompt_bank`만 보지 말고 `wake`와 `intent_enabled`가 모두 켜져 있을 때만 `IDLE`로 시작하게 하라:
+       ```python
+       initial_lifecycle = (
+           SessionState.IDLE
+           if (getattr(engines, "prompt_bank", None) is not None and self.feature_prefs["wake"] and self.intent_enabled)
+           else SessionState.ACTIVE
+       )
+       ```
+       이렇게 해야 서버를 `--no-wake`나 `--no-intent`(D2 벤치마크)로 띄웠을 때 `IDLE` 게이트에 막혀 마이크가 먹통이 되는 현상을 막을 수 있다.
+   (b) `session.py:222` `send_hello()` 응답 JSON에 `"session_state": self.lifecycle.state` 필드를 추가하라.
+   (c) `src/voice_pipeline/web/lifecycle.py`: `SessionLifecycle.__init__`에 `self._prev_state: str = initial_state`를 두고, `request_confirm()` 진입 시 `if self._state != SessionState.CONFIRMING: self._prev_state = self._state`로 저장한 뒤, `resolve_confirm()` 완료 시 무조건 `SessionState.ACTIVE`로 가지 않고 `self._prev_state`(대기 중 확인 명령이었으면 `IDLE`)로 복귀하게 하라.
+
+3. 첫 터치 직후 "마이크 대기 중" 화면 표시 및 재시작 터치 연동 (src/voice_pipeline/web/static/app.js):
+   (a) `let currentSessionState = "idle";` 상태 변수를 두고, `updateAvatarHint()` 함수를 만들어 자리표시 카드 문구를 일관되게 갱신하라:
+       - `!running`: `"화면을 터치하여 대화를 시작하세요"`
+       - `running && currentSessionState === "idle"`:
+         * `prefs.wake`가 true이면: `"마이크 대기 중 ('시작하자'라고 말씀해 주세요)"`
+         * `prefs.wake`가 false이면: `"대화가 종료되었습니다 (화면을 터치하여 대화를 시작하세요)"`
+       - `running && currentSessionState !== "idle"`: `"대화 진행 중입니다 (편하게 말씀하세요)"`
+   (b) `onHello(m)`에서 `if (m.session_state) currentSessionState = m.session_state;`를 반영한 뒤 `updateAvatarHint()`를 호출하라. 또한 첫 터치(`start()`) 후 `ws.onopen` 시점에 `!prefs.wake && currentSessionState === "idle"`이면 `send({ type: "session_start" })`를 보내 바로 대화가 시작되게 하라.
+   (c) `case "session_state":`에서 `currentSessionState = m.state; updateAvatarHint();`를 호출하고, `case "reset_done":`에서 `currentSessionState = "idle"; updateAvatarHint();`를 호출하며, `$("prefWake").onchange`에서도 `updateAvatarHint()`를 호출하라.
+   (d) `$("avatarCard").onclick`에서 `!running`이면 `start()`를 부르고, 이미 `running && currentSessionState === "idle"`이면 첫 터치 화면 재표시 없이 `send({ type: "session_start" })`를 보내 터치로도 세션을 시작/재시작할 수 있게 하라.
+
+4. 시험 보강 (tests/test_wake.py, bench/web_ui_check.py):
+   (a) `tests/test_wake.py`의 시험 1(`test_idle_non_command_discarded_...`)에 다음 단언을 추가하라:
+       - `dev_event` 메시지가 0개인지 (`assert not any(isinstance(m, dict) and m.get("type") == "dev_event" for m in received_msgs)`)
+       - `session_obj._last_pcm is None`인지 및 `{"type": "retranscribe"}` 전송 시 `"다시 인식할 마이크 발화가 없습니다"` `error`가 오고 비명령 텍스트가 `retranscript`로 노출되지 않는지
+       - 대기(`idle`) 상태에서 확인 등급 명령(`"개발 모드로 바꿔 줘"`) 후 `"아니요"` 응답 시 `active`로 새지 않고 `idle`로 복귀하는지
+   (b) `bench/web_ui_check.py`의 `check_2_demo_onhello_hidden` 및 `check_7_avatar_touch_start`를 C4 수명주기(첫 터치 직후 `wake=true` 기본 상태에서 `"마이크 대기 중 ('시작하자'라고 말씀해 주세요)"` 표시 확인, 이후 `#avatarCard` 클릭 또는 `session_start` 전송 시 `"대화 진행 중입니다"` 전환, `session_end` 시 첫 터치 화면 재표시 없이 `"마이크 대기 중"` 복귀 확인)에 맞게 갱신하고 실행해 통과를 확인하라.
+
+5. 검증 및 커밋:
+   - `.venv/bin/python -m pytest tests/test_wake.py tests/test_lifecycle.py tests/test_session_commands.py` 및 전체 `.venv/bin/python -m pytest` 통과 확인
+   - C4 대상 파일만 지정하여 커밋:
+     git add src/voice_pipeline/web/__main__.py src/voice_pipeline/web/engines.py src/voice_pipeline/web/lifecycle.py src/voice_pipeline/web/session.py src/voice_pipeline/web/static/app.js tests/test_wake.py bench/web_ui_check.py
+     git commit -m "webapp C4: 대기 청취(--wake) 마이크 게이트, 비명령 무기록 폐기 및 화면 상태 연동"
+```
+
+
 
 
 

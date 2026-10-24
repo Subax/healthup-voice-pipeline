@@ -74,7 +74,7 @@ from ..prompts import (
 from ..trace import (BACKCHANNEL, FIRST_CHUNK, LLM_FIRST_TOKEN, PLAYBACK_START, SPEECH_END, STT_FINAL,
                      TTS_FIRST_AUDIO, TURN_CONFIRMED, TurnTrace)
 from ..endpoint.turn import ConfirmedTurn, TurnEndpointer
-from ..llm.hint import emotion_hint
+from ..llm.hint import emotion_hint, fused_hint
 from ..tone import AUTO, CALM, extract_features, pick_tone
 from .devlog import DevLogger
 from .engines import Engines
@@ -118,6 +118,8 @@ class _Spec:
     tone: str | None
     emotion: str | None
     event: str | None
+    hint_text: str | None = None
+    hint_rule: str = "R0"
     deltas: list[tuple[int, str]] = field(default_factory=list)
     held: bool = True         # True인 동안 assistant_delta를 보관한다
     claimed: bool = False     # 확정되어 응답 작업이 넘겨받았다
@@ -133,6 +135,7 @@ class DemoSession:
         self._barge_events: list[dict] = []
         self._last_turn_eval_reason: str | None = None
         self._last_face_summary: dict | None = None
+        self._accepting_face_summary: bool = True
         first_min = engines.first_min
         self.pipeline = VoicePipeline(TeeLLM(engines.llm, self._on_token), engines.tts, self.sink,
                                       chunker_factory=lambda: SemanticChunker(first_min=first_min))
@@ -292,6 +295,7 @@ class DemoSession:
         self._turn_tokens.clear()
         self._barge_events.clear()
         self._notice_played = False
+        self._last_face_summary = None
         await self.lifecycle.transition_to(SessionState.IDLE)
 
     async def _on_token(self, turn_id: int, text: str) -> None:
@@ -340,6 +344,7 @@ class DemoSession:
             kind = type(ev).__name__
             if kind == "SpeechStart":
                 self._speech_start_time = time.monotonic()
+                self._accepting_face_summary = True
                 await self.send({"type": "vad", "speaking": True})
                 if self.lifecycle.is_idle:
                     continue
@@ -353,6 +358,7 @@ class DemoSession:
                 if self.endpoint_mode == "smart":
                     await self.endpointer.on_speech_start()
             elif kind == "VoiceOnset":  # SpeechStart보다 빠른 신호: 대기 타이머만 멈춘다 (barge-in 아님)
+                self._accepting_face_summary = True
                 if self.lifecycle.is_idle:
                     continue
                 if self.endpoint_mode == "smart":
@@ -450,12 +456,27 @@ class DemoSession:
             await self.start_session(play_notice=play_notice)
         elif kind in ("session_end", "end"):
             await self.end_session()
+        elif kind == "face_summary":
+            if not self.feature_prefs.get("face", False):
+                return
+            if not self._accepting_face_summary or self._stage == "respond":
+                log.debug("턴 종료 후(또는 응답 중) 도착한 표정 요약 버림")
+                return
+            self._last_face_summary = {
+                "label": str(msg.get("label", "")),
+                "conf": float(msg.get("conf", 0.0)),
+                "coverage": float(msg.get("coverage", 0.0)),
+                "n_frames": int(msg.get("n_frames", 0)),
+                "total_frames": int(msg.get("total_frames", 0)),
+            }
         elif kind == "reset":
             await self._stop_current()
             self.pipeline.history.clear()
             self._turn_tokens.clear()
             self._barge_events.clear()
             self._notice_played = False
+            self._last_face_summary = None
+            self._accepting_face_summary = True
             await self.lifecycle.reset()
             await self.send({"type": "reset_done"})
 
@@ -503,8 +524,11 @@ class DemoSession:
 
     # ---------- 선행 생성 ----------
 
-    def _hint(self, emotion: str | None) -> str | None:
-        return emotion_hint(emotion) if self.emotion_hint else None
+    def _hint(self, emotion: str | None) -> tuple[str | None, str]:
+        if not self.emotion_hint:
+            return None, "R0"
+        face_enabled = bool(self.feature_prefs.get("face", False))
+        return fused_hint(emotion, self._last_face_summary, face_enabled=face_enabled)
 
     def _pick_opener(self) -> bytes | None:
         bank = self.engines.backchannel
@@ -533,8 +557,9 @@ class DemoSession:
         emotion, event = getattr(last, "emotion", None), getattr(last, "event", None)
         tone = self._apply_tone(emotion, pcm16, text) if self._auto_active() else None
         trace = TurnTrace(0)
-        pt = await self.pipeline.prepare(text, trace=trace, opener=self._pick_opener(), hint=self._hint(emotion))
-        self._spec = _Spec(pt, text, trace, tone, emotion, event)  # prepare 직후, 첫 토큰보다 먼저 보관한다
+        hint_text, hint_rule = self._hint(emotion)
+        pt = await self.pipeline.prepare(text, trace=trace, opener=self._pick_opener(), hint=hint_text)
+        self._spec = _Spec(pt, text, trace, tone, emotion, event, hint_text=hint_text, hint_rule=hint_rule)  # prepare 직후, 첫 토큰보다 먼저 보관한다
         log.debug("선행 생성 시작 utt=%s turn=%s text=%r", utt_id, pt.turn_id, text)
 
     async def _on_speculate_cancel(self) -> None:
@@ -820,7 +845,7 @@ class DemoSession:
             return ""
         elif intent == INTENT_CAMERA_ON:
             self.feature_prefs["face"] = True
-            await self.send({"type": "config", "face": True})
+            await self.send({"type": "config", "face": True, "consent": True})
             return ""
         elif intent == INTENT_UI_BADGE_TOGGLE:
             target = payload.get("target")
@@ -887,7 +912,8 @@ class DemoSession:
     def _write_dev_record(self, utt_id: int, turn_id: int, text: str, stt_id: str, stt_ms: float,
                           emotion: str | None, event: str | None, hint_rule: str,
                           intent: str, grade: str, rule: str, classify_ms: float,
-                          llm_text: str, spoken_text: str, interrupted: bool, turn_trace: dict) -> None:
+                          llm_text: str, spoken_text: str, interrupted: bool, turn_trace: dict,
+                          face: dict | None = None) -> None:
         if self.mode != "dev":
             return
         barge_list = list(self._barge_events)
@@ -903,7 +929,7 @@ class DemoSession:
             "stt_ms": round(stt_ms, 1),
             "emotion": emotion,
             "event": event,
-            "face": self._last_face_summary,
+            "face": face,
             "hint_rule": hint_rule,
             "intent": {
                 "intent": intent,
@@ -962,6 +988,25 @@ class DemoSession:
             if pcm16 is not None:
                 self._last_pcm = pcm16
 
+            hint_text, hint_rule = self._hint(emotion)
+            turn_face = self._last_face_summary
+            face_label = turn_face.get("label") if turn_face else None
+            self._last_face_summary = None  # 확정 시점에 소비 (§4.2-5, 리뷰 #2)
+            self._accepting_face_summary = False  # 이번 턴 종료까지 새 표정 요약 수신 차단
+
+            # 확정 시점 hint가 선행 생성에 쓴 hint와 다르면 선행 생성을 버리고 확정 hint로 다시 생성 (리뷰 #2 보완)
+            if spec is not None and spec.hint_text != hint_text:
+                log.debug("선행 hint 불일치 (spec=%r, confirmed=%r) -> 선행 생성 취소 후 확정 hint로 재응답",
+                          spec.hint_text, hint_text)
+                old_tid = spec.pt.turn_id
+                await spec.pt.abort()
+                self._turn_tokens.pop(old_tid, None)
+                if self._spec is spec:
+                    self._spec = None
+                spec = None
+
+            actual_hint_rule = spec.hint_rule if spec is not None else hint_rule
+
             if spec is not None:   # 톤·맞장구는 선행 시작 때 이미 골랐다
                 tone, turn_id = spec.tone, spec.pt.turn_id
             else:
@@ -980,12 +1025,12 @@ class DemoSession:
                 "rule": rule,
                 "classify_ms": classify_ms,
             })
-            hint_rule = "R0" if emotion else "R0"
             await self.send({
                 "type": "dev_event",
                 "event": "hint",
-                "rule": hint_rule,
+                "rule": actual_hint_rule,
                 "emotion": emotion,
+                "face": face_label,
             })
 
             # 1. 확인 대기 (confirming) 상태 처리
@@ -998,16 +1043,16 @@ class DemoSession:
                     await self.send({"type": "session_state", "state": self.lifecycle.state})
                     await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": turn_id,
                                      "interrupted": False, "spoken_text": spoken_text or "", "trace": {"stt_ms": round(stt_ms, 1)}})
-                    self._write_dev_record(utt_id, turn_id, text, stt_id, stt_ms, emotion, event, hint_rule,
-                                           intent, grade, rule, classify_ms, spoken_text or "", spoken_text or "", False, {"stt_ms": round(stt_ms, 1)})
+                    self._write_dev_record(utt_id, turn_id, text, stt_id, stt_ms, emotion, event, actual_hint_rule,
+                                           intent, grade, rule, classify_ms, spoken_text or "", spoken_text or "", False, {"stt_ms": round(stt_ms, 1)}, face=turn_face)
                     return
                 elif intent == INTENT_CONFIRM_NO:
                     await self.lifecycle.resolve_confirm(confirmed=False)
                     await self.send({"type": "session_state", "state": self.lifecycle.state})
                     await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": turn_id,
                                      "interrupted": False, "spoken_text": "", "trace": {"stt_ms": round(stt_ms, 1)}})
-                    self._write_dev_record(utt_id, turn_id, text, stt_id, stt_ms, emotion, event, hint_rule,
-                                           intent, grade, rule, classify_ms, "", "", False, {"stt_ms": round(stt_ms, 1)})
+                    self._write_dev_record(utt_id, turn_id, text, stt_id, stt_ms, emotion, event, actual_hint_rule,
+                                           intent, grade, rule, classify_ms, "", "", False, {"stt_ms": round(stt_ms, 1)}, face=turn_face)
                     return
                 else:
                     await self.lifecycle.resolve_confirm(confirmed=False)
@@ -1021,8 +1066,8 @@ class DemoSession:
                     self._last_bot_text = prompt_text
                     await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": turn_id,
                                      "interrupted": False, "spoken_text": prompt_text, "trace": {"stt_ms": round(stt_ms, 1)}})
-                    self._write_dev_record(utt_id, turn_id, text, stt_id, stt_ms, emotion, event, hint_rule,
-                                           intent, grade, rule, classify_ms, prompt_text, prompt_text, False, {"stt_ms": round(stt_ms, 1)})
+                    self._write_dev_record(utt_id, turn_id, text, stt_id, stt_ms, emotion, event, actual_hint_rule,
+                                           intent, grade, rule, classify_ms, prompt_text, prompt_text, False, {"stt_ms": round(stt_ms, 1)}, face=turn_face)
                     return
                 elif pcm16 is None:
                     # direct text_input 하위 호환
@@ -1043,8 +1088,8 @@ class DemoSession:
                     self._last_bot_text = prompt_text
                     await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": turn_id,
                                      "interrupted": False, "spoken_text": prompt_text, "trace": {"stt_ms": round(stt_ms, 1)}})
-                    self._write_dev_record(utt_id, turn_id, text, stt_id, stt_ms, emotion, event, hint_rule,
-                                           intent, grade, rule, classify_ms, prompt_text, prompt_text, False, {"stt_ms": round(stt_ms, 1)})
+                    self._write_dev_record(utt_id, turn_id, text, stt_id, stt_ms, emotion, event, actual_hint_rule,
+                                           intent, grade, rule, classify_ms, prompt_text, prompt_text, False, {"stt_ms": round(stt_ms, 1)}, face=turn_face)
                     return
                 elif grade == GRADE_IMMEDIATE:
                     spoken_text = await self._execute_immediate_command(intent, payload, turn_id)
@@ -1052,17 +1097,27 @@ class DemoSession:
                         self._last_bot_text = spoken_text
                     await self.send({"type": "turn_done", "utt_id": utt_id, "turn_id": turn_id,
                                      "interrupted": False, "spoken_text": spoken_text, "trace": {"stt_ms": round(stt_ms, 1)}})
-                    self._write_dev_record(utt_id, turn_id, text, stt_id, stt_ms, emotion, event, hint_rule,
-                                           intent, grade, rule, classify_ms, spoken_text, spoken_text, False, {"stt_ms": round(stt_ms, 1)})
+                    self._write_dev_record(utt_id, turn_id, text, stt_id, stt_ms, emotion, event, actual_hint_rule,
+                                           intent, grade, rule, classify_ms, spoken_text, spoken_text, False, {"stt_ms": round(stt_ms, 1)}, face=turn_face)
                     return
 
             # 4. 일반 대화 (LLM 경로)
             if spec is not None:
                 await self._release_spec_ui(spec)
                 self._stage = "respond"
+                self._accepting_face_summary = False
                 if spec.pt.state == "aborted":
                     res = None
                 else:
+                    # 확정 때 계산한 hint를 commit과 일치시킴 (§4.6, 리뷰 #2)
+                    if self.pipeline.history:
+                        for m in reversed(self.pipeline.history):
+                            if m.get("role") == "user":
+                                if hint_text:
+                                    m["hint"] = hint_text
+                                else:
+                                    m.pop("hint", None)
+                                break
                     log.debug("선행 결과 commit turn=%s", turn_id)
                     res = await spec.pt.commit()
                 if res is None:
@@ -1077,7 +1132,8 @@ class DemoSession:
                     turn_trace = {"stt_ms": round(stt_ms, 1), **self._trace_ms(res.trace)}
             else:
                 self._stage = "respond"
-                res = await self.pipeline.respond(text, trace=trace, opener=self._pick_opener(), hint=self._hint(emotion))
+                self._accepting_face_summary = False
+                res = await self.pipeline.respond(text, trace=trace, opener=self._pick_opener(), hint=hint_text)
                 done_turn_id = res.trace.turn_id
                 interrupted = res.interrupted
                 spoken_text = res.spoken_text
@@ -1095,8 +1151,8 @@ class DemoSession:
             elif spoken_text:
                 self._last_bot_text = spoken_text
 
-            self._write_dev_record(utt_id, done_turn_id, text, stt_id, stt_ms, emotion, event, hint_rule,
-                                   intent, grade, rule, classify_ms, llm_text, spoken_text, interrupted, turn_trace)
+            self._write_dev_record(utt_id, done_turn_id, text, stt_id, stt_ms, emotion, event, actual_hint_rule,
+                                   intent, grade, rule, classify_ms, llm_text, spoken_text, interrupted, turn_trace, face=turn_face)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -1104,6 +1160,8 @@ class DemoSession:
             await self.send({"type": "error", "message": f"{type(e).__name__}: {e}"})
         finally:
             self._stage = None
+            self._accepting_face_summary = False
+            self._last_face_summary = None  # 턴 완료 후 이전 턴 표정 요약 정리 (§4.2-5, §4.4-3)
             if spec is not None:
                 if self._spec is spec:
                     self._spec = None
