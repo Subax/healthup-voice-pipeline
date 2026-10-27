@@ -92,6 +92,7 @@ function applyVisibility() {
   if ($("micCard")) $("micCard").hidden = !showDev;
   if ($("textCard")) $("textCard").hidden = !showDev;
   if ($("logCard")) $("logCard").hidden = !showDev;
+  applyTalkLayout(showDev);
   if ($("latCard")) $("latCard").hidden = !showDev;
   if ($("epCard") && !showDev) $("epCard").hidden = true;
 
@@ -114,9 +115,21 @@ function applyVisibility() {
   if ($("prefConnStatus")) $("prefConnStatus").checked = !!prefs.show_conn_status;
   if ($("prefDevInfo")) $("prefDevInfo").checked = !!prefs.show_dev_info;
 
-  // 얼굴 상태 패널은 개발 모드에서만 보인다. 데모의 개발 정보 토글로는 열지 않는다.
-  if ($("faceHud")) $("faceHud").hidden = !window.FaceHud || !window.FaceHud.faceHudVisible(currentMode);
   renderFaceHud();
+}
+
+function applyTalkLayout(showLog) {
+  const hud = window.FaceHud;
+  const layout = hud && hud.talkLayout
+    ? hud.talkLayout(!!prefs.face, currentMode)
+    : { showCamera: !!prefs.face, showOverlay: false, showStatus: false, columns: 1 };
+  if ($("faceStage")) $("faceStage").hidden = !layout.showCamera;
+  if ($("faceOverlay")) $("faceOverlay").hidden = !layout.showOverlay;
+  if ($("faceHud")) $("faceHud").hidden = !layout.showStatus;
+  if ($("talkStage")) {
+    $("talkStage").hidden = !showLog && !layout.showCamera;
+    $("talkStage").classList.toggle("split", !!(layout.showCamera && showLog));
+  }
 }
 
 // ---------- UI ----------

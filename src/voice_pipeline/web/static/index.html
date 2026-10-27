@@ -74,23 +74,23 @@ th { color:var(--muted); font-weight:600; }
 .modal-overlay { position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:1000; }
 .modal-card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; max-width:460px; box-shadow:0 8px 24px rgba(0,0,0,0.2); }
 
-@media (max-width:700px) { main { grid-template-columns:1fr; } }
-
-/* 개발 모드 얼굴 상태. 데모 모드에서는 hidden 이다. */
-#faceHud {
-  position:fixed; right:12px; bottom:12px; z-index:30; width:240px;
-  background:var(--card); color:var(--fg); border:1px solid var(--line);
-  border-radius:10px; padding:8px; box-shadow:0 4px 16px rgba(0,0,0,.18);
-  pointer-events:none;
-}
-#faceHud h2 { margin:0 0 6px; font-size:13px; font-weight:600; }
-#facePreview { position:relative; width:100%; height:144px; background:#111; border-radius:6px; overflow:hidden; }
+#talkStage { grid-column:1/-1; display:grid; gap:12px; grid-template-columns:1fr; min-width:0; }
+#talkStage.split { grid-template-columns:1fr 1fr; align-items:stretch; }
+#talkStage > .card { min-width:0; }
+#faceStage { display:flex; flex-direction:column; gap:8px; }
+#facePreview { position:relative; flex:1 1 auto; width:100%; min-height:320px; background:#111; border-radius:8px; overflow:hidden; }
 #facePreview video, #faceOverlay { position:absolute; inset:0; width:100%; height:100%; }
 #facePreview video { object-fit:cover; }
 #faceOverlay { pointer-events:none; }
-#faceHud dl { display:grid; grid-template-columns:72px 1fr; gap:2px 6px; margin:8px 0 0; font-size:12px; line-height:1.35; }
+#faceHud h2 { margin:0 0 6px; font-size:13px; font-weight:600; }
+#faceHud dl { display:grid; grid-template-columns:72px 1fr; gap:2px 6px; margin:0; font-size:12px; line-height:1.35; }
 #faceHud dt { color:var(--muted); }
 #faceHud dd { margin:0; word-break:break-all; }
+@media (max-width:700px) {
+  main { grid-template-columns:1fr; }
+  #talkStage.split { grid-template-columns:1fr; }
+  #facePreview { min-height:220px; }
+}
 </style>
 </head>
 <body>
@@ -173,7 +173,28 @@ th { color:var(--muted); font-weight:600; }
     <p id="err" class="hint"></p>
   </section>
 
-  <section class="card wide" id="logCard"><h2>대화</h2><div id="log"></div></section>
+  <div id="talkStage" class="wide">
+    <section class="card" id="logCard"><h2>대화</h2><div id="log"></div></section>
+    <section class="card" id="faceStage" hidden>
+      <div id="facePreview">
+        <video id="faceVideo" autoplay playsinline muted></video>
+        <canvas id="faceOverlay"></canvas>
+      </div>
+      <div id="faceHud" hidden>
+        <h2>얼굴과 감정 인식 상태</h2>
+        <dl>
+          <dt>얼굴 검출</dt><dd id="faceHudDetected">없음</dd>
+          <dt>신뢰도</dt><dd id="faceHudScore">없음</dd>
+          <dt>얼굴 수</dt><dd id="faceHudCount">0</dd>
+          <dt>감정</dt><dd id="faceHudEmotions">없음</dd>
+          <dt>처리 속도</dt><dd id="faceHudFps">없음</dd>
+          <dt>마지막 요약</dt><dd id="faceHudLast">아직 없음</dd>
+          <dt>엔진</dt><dd id="faceHudEngine">없음</dd>
+          <dt>카메라</dt><dd id="faceHudCamera">대기</dd>
+        </dl>
+      </div>
+    </section>
+  </div>
 
   <!-- 얼굴 표정 분석 동의 모달 (§4.4) -->
   <div id="faceConsentModal" class="modal-overlay" hidden>
@@ -212,23 +233,6 @@ th { color:var(--muted); font-weight:600; }
     </table>
   </section>
 </main>
-<div id="faceHud" hidden>
-  <h2>얼굴과 감정 인식 상태</h2>
-  <div id="facePreview">
-    <video id="faceVideo" autoplay playsinline muted></video>
-    <canvas id="faceOverlay"></canvas>
-  </div>
-  <dl>
-    <dt>얼굴 검출</dt><dd id="faceHudDetected">없음</dd>
-    <dt>신뢰도</dt><dd id="faceHudScore">없음</dd>
-    <dt>얼굴 수</dt><dd id="faceHudCount">0</dd>
-    <dt>감정</dt><dd id="faceHudEmotions">없음</dd>
-    <dt>처리 속도</dt><dd id="faceHudFps">없음</dd>
-    <dt>마지막 요약</dt><dd id="faceHudLast">아직 없음</dd>
-    <dt>엔진</dt><dd id="faceHudEngine">없음</dd>
-    <dt>카메라</dt><dd id="faceHudCamera">대기</dd>
-  </dl>
-</div>
 <script src="/static/vendor/face-api/face-api.js"></script>
 <script src="/static/face-hud.js"></script>
 <script src="/static/app.js"></script>

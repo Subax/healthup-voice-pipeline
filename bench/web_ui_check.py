@@ -131,7 +131,8 @@ async def check_3_dev_mode(page) -> None:
 
     # 데모 전용 자리표시 카드는 숨김 확인
     assert not await page.is_visible("#avatarCard"), "개발 모드에서 #avatarCard는 숨겨져야 함"
-    assert await page.is_visible("#faceHud"), "개발 모드에서 #faceHud가 보여야 함"
+    assert not await page.is_visible("#faceStage"), "카메라가 꺼진 개발 모드에서는 카메라 칸이 숨겨져야 함"
+    assert not await page.is_visible("#faceHud"), "카메라가 꺼진 개발 모드에서는 상태 패널이 숨겨져야 함"
     hud_engine = (await page.text_content("#faceHudEngine") or "").strip()
     assert hud_engine.startswith("face-api") or hud_engine == "없음", f"엔진 표시가 비어 있거나 예상 밖: {hud_engine}"
 

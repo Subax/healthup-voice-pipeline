@@ -100,17 +100,30 @@ def test_restore_face_starts_camera_only_with_consent():
         "process.stdout.write(JSON.stringify(out));\n"
     )
     out = json.loads(_node(script))
-    assert out[0] == {"mode": "dev", "face": True, "startCamera": True, "showPreview": True}
-    assert out[1] == {"mode": "demo", "face": True, "startCamera": True, "showPreview": False}
-    assert out[2] == {"mode": "dev", "face": False, "startCamera": False, "showPreview": False}
-    assert out[3] == {"mode": "dev", "face": False, "startCamera": False, "showPreview": False}
+    assert out[0] == {
+        "mode": "dev", "face": True, "startCamera": True, "showPreview": True, "showStatus": True,
+    }
+    assert out[1] == {
+        "mode": "demo", "face": True, "startCamera": True, "showPreview": True, "showStatus": False,
+    }
+    assert out[2] == {
+        "mode": "dev", "face": False, "startCamera": False, "showPreview": False, "showStatus": False,
+    }
+    assert out[3] == {
+        "mode": "dev", "face": False, "startCamera": False, "showPreview": False, "showStatus": False,
+    }
 
     html = HTML.read_text(encoding="utf-8")
-    hud_at = html.index('id="faceHud"')
-    video_at = html.index('id="faceVideo"')
+    stage_at = html.index('id="talkStage"')
+    log_at = html.index('id="logCard"')
+    camera_at = html.index('id="faceStage"')
     preview_at = html.index('id="facePreview"')
-    hud_end = html.index("</div>", video_at)
-    assert hud_at < preview_at < video_at < hud_end
+    video_at = html.index('id="faceVideo"')
+    overlay_at = html.index('id="faceOverlay"')
+    hud_at = html.index('id="faceHud"')
+    assert stage_at < log_at < camera_at < preview_at < video_at < overlay_at < hud_at
+    assert 'id="faceStage" hidden' in html
+    assert 'id="faceHud" hidden' in html
 
     app = APP.read_text(encoding="utf-8")
     assert "restoreFaceOnLoad" in app
@@ -120,13 +133,48 @@ def test_restore_face_starts_camera_only_with_consent():
     assert app.index("setMode(currentMode, false);", init) < app.index("applyStoredFace();", init)
 
 
+def test_talk_layout_splits_only_while_camera_is_on():
+    script = (
+        "const hud = require(" + json.dumps(str(HUD)) + ");\n"
+        "const rows = ["
+        "hud.talkLayout(false, 'dev', 1280),"
+        "hud.talkLayout(true, 'dev', 1280),"
+        "hud.talkLayout(true, 'dev', 768),"
+        "hud.talkLayout(true, 'demo', 1024),"
+        "hud.talkLayout(true, 'dev', 390),"
+        "hud.talkLayout(true, 'demo', 390)"
+        "];\n"
+        "process.stdout.write(JSON.stringify(rows));\n"
+    )
+    rows = json.loads(_node(script))
+    assert rows[0] == {"showCamera": False, "showOverlay": False, "showStatus": False, "columns": 1}
+    assert rows[1] == {"showCamera": True, "showOverlay": True, "showStatus": True, "columns": 2}
+    assert rows[2]["columns"] == 2
+    assert rows[3] == {"showCamera": True, "showOverlay": False, "showStatus": False, "columns": 2}
+    assert rows[4] == {"showCamera": True, "showOverlay": True, "showStatus": True, "columns": 1}
+    assert rows[5]["columns"] == 1
+    assert rows[5]["showStatus"] is False
+
+    html = HTML.read_text(encoding="utf-8")
+    assert "#talkStage.split { grid-template-columns:1fr 1fr;" in html
+    assert "#talkStage.split { grid-template-columns:1fr; }" in html
+    assert "max-width:700px" in html
+    assert "min-height:320px" in html
+    app = APP.read_text(encoding="utf-8")
+    assert "talkLayout" in app
+    assert 'classList.toggle("split"' in app
+    assert "toDataURL" not in app
+    assert "MediaRecorder" not in app
+
+
 def test_face_hud_markup_stays_hidden_and_sends_no_pixels():
     html = HTML.read_text(encoding="utf-8")
     assert 'id="faceHud" hidden' in html
     assert 'id="faceVideo"' in html
     assert 'id="faceOverlay"' in html
     app = APP.read_text(encoding="utf-8")
-    assert "faceHudVisible(currentMode)" in app
+    assert "talkLayout" in app
+    assert "faceHudVisible" in HUD.read_text(encoding="utf-8")
     assert "toDataURL" not in app
     assert "MediaRecorder" not in app
     assert 'type: "face_summary"' in app

@@ -12,13 +12,27 @@
 
   function restoreFaceOnLoad(face, consented, mode) {
     if (!consented) {
-      return { face: false, startCamera: false, showPreview: false };
+      return { face: false, startCamera: false, showPreview: false, showStatus: false };
     }
     const on = !!face;
     return {
       face: on,
       startCamera: on,
-      showPreview: on && faceHudVisible(mode),
+      showPreview: on,
+      showStatus: on && faceHudVisible(mode),
+    };
+  }
+
+  function talkLayout(faceOn, mode, width) {
+    const camera = !!faceOn;
+    const dev = faceHudVisible(mode);
+    const w = Number(width);
+    const narrow = Number.isFinite(w) && w <= 700;
+    return {
+      showCamera: camera,
+      showOverlay: camera && dev,
+      showStatus: camera && dev,
+      columns: camera && !narrow ? 2 : 1,
     };
   }
 
@@ -66,5 +80,10 @@
     };
   }
 
-  return { faceHudVisible: faceHudVisible, restoreFaceOnLoad: restoreFaceOnLoad, lines: lines };
+  return {
+    faceHudVisible: faceHudVisible,
+    restoreFaceOnLoad: restoreFaceOnLoad,
+    talkLayout: talkLayout,
+    lines: lines,
+  };
 });
