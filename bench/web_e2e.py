@@ -17,14 +17,17 @@ async def main(wav):
         pg.on("pageerror", lambda e: print("pageerror:", e))
         sent = []
         pg.on("websocket", lambda ws: ws.on("framesent", lambda f: sent.append(f) if isinstance(f, str) and "playback" in f else None))
-        await pg.goto("http://127.0.0.1:8080/")
+        await pg.goto(os.environ.get("WEB_E2E_URL", "http://127.0.0.1:8080/"))
         await pg.click("#start")
         want = int(sys.argv[2]) if len(sys.argv) > 2 else 1
         for _ in range(300):
             await asyncio.sleep(0.5)
             if sum(("finished" in s) or ("stopped" in s) for s in sent) >= want: break
         print("LOG:", await pg.inner_text("#log"))
-        print("LAT:", await pg.inner_text("#lat"))
+        lat = await pg.evaluate("""() => [...document.querySelectorAll('#lat tr')]
+          .map(tr => [...tr.cells].map(td => (td.textContent || '').trim()).join('\\t')).join('\\n')""")
+        print("LAT:")
+        print(lat)
         print("ERR:", await pg.inner_text("#err"))
         print("BADGE:", await pg.inner_text("#badge"))
         print("playback msgs:", len(sent), sent[:2], [s for s in sent if "finished" in s or "stopped" in s][:2])
