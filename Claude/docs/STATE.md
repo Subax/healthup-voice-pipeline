@@ -11,22 +11,22 @@
 
 ## 1. 현재 상태 (최종 갱신: 2026-10-27)
 
-이번 세션: 개발 모드 전용 얼굴 상태 표시를 넣었다. 미리보기, 얼굴 박스, 랜드마크, 검출 상태 패널이다. 서버로 보내는 것은 기존 `face_summary`뿐이다. pytest 329 passed. 태블릿 화면은 확인하지 않았다.
+이번 세션: `scripts/fetch_face_models.sh` 주석의 가운데점을 쉼표로 바꿨다 (`80ecec5`). D1b로 명령 문형에 조사, 확인 구어, 위기 어간을 보강했다 (`dc8cabe`). pytest 330 passed. D1 녹음 재실행과 서버 부하 측정은 하지 않았다. 웹 서버와 컨테이너는 재시작하거나 멈추지 않았다.
 
 **결론**: 지연 개선 코드를 모두 넣었다. 본문 첫 오디오는 P50 1.8초(목표 1.0초)로 아직 미달이다. 남은 병목은 LLM과 같은 GPU를 쓰는 TTS 첫 오디오(약 1.0초)다. 맞장구는 발화 끝 0.35초에 난다.
 남은 일은 대부분 **녹음·청취·태블릿 실기**가 필요하다 (`docs/PLAN.md` §3).
 
 **목표 변경 (사용자 결정 2026-10-21)**: 데모 마감 2026-11-27. 산업용 태블릿(브라우저 클라이언트, 연산은 서버)에서 STT·TTS 지연을 줄인다. LLM은 프롬프트 수준 조정만 한다. `OBJECTIVE.md`(11/08, Unreal 재생)와 다르다. 사용자 요청 때만 고친다.
 
-**지금 할 일**: 사용자 입력 대기 — ① 태블릿 모델과 서버 네트워크 정보 ② 실제 마이크 발화 20턴 이상 ③ 청취 확인 (CV_HOP 10, 감정 hint). `docs/PLAN.md` §3 참고.
+**지금 할 일**: D1 음성 명령 녹음. 그 뒤에 D1b 문형을 녹음으로 다시 잰다. D2 실측, 태블릿, 청취는 그다음이다.
 
 **단계**: 지연 개선 코드 완료. 녹음·청취·태블릿 시험 대기
 
 **저장소**
 
-- git `main` @ `d2805cd` + 미커밋 문서 (docs/PLAN.md, STATE.md, LEGAL_REVIEW.md, Claude/docs/STATE.md)
-- 테스트: 243개 통과 (`.venv/bin/python -m pytest`, 약 2분)
-- 서비스: `healthup-llm`(8000), `healthup-cosyvoice`(8091, CV_HOP 10) 실행 중. ASR 컨테이너·웹 데모는 꺼져 있다
+- git `main` @ `dc8cabe` (직전 `80ecec5`). 푸시하지 않았다
+- 테스트: 330 passed (`.venv/bin/python -m pytest`, 174.82초). 경고 5건은 기존 `test_tts_cosyvoice.py`의 `NotAppKeyWarning`
+- 서비스: 이 세션에서 웹 서버와 컨테이너를 재시작하거나 멈추지 않았다. 실행 여부는 확인하지 않았다.
 
 **구현 완료**
 
@@ -156,7 +156,7 @@
 
 ## 2. 다음 할 일 (우선순위 순)
 
-1. **사용자 입력 받기** (`docs/PLAN.md` §3): 태블릿 모델·OS·브라우저, 서버 IP, 실제 발화 녹음 20턴 이상
+1. **D1 음성 명령 녹음** 후 D1b 문형을 녹음으로 다시 잰다. 녹음 파일은 아직 없다
 2. **태블릿 실기 시험** — `scripts/gen_cert.sh <서버IP>` → 인증서 설치 → `https://<IP>:8080/?t=<토큰>` → RTT·마이크·재연결 확인
 3. **청취 확인** — `bench/results/latency_2610/hop10/` vs `hop25/` wav, 감정 hint 문장, 맞장구 덕킹
 4. **턴 종료 규칙표 조정** — 녹음 로그로 `rules.py` 대기값·`SPECULATE_RULES`·`VoiceOnset` 임계값을 정한다. 선행 생성 효과도 여기서 잰다
@@ -167,6 +167,15 @@
 ---
 
 ## 3. 세션 로그 (최신이 위)
+
+### 2026-10-27 주석 쉼표, D1b 문형 보강
+
+한 일: 표정 모델 받기 스크립트 주석의 가운데점을 쉼표로 바꿨다. 의도 분류기에 조사, 확인 구어, 위기 어간을 넣었다.
+확인한 것: `.venv/bin/python -m pytest` 330 passed, 174.82초. `tests/test_intent.py` 10 passed. D1 녹음 파일은 없다.
+확인하지 않은 것: D1 음성 재실행, 브라우저, 서버 부하.
+코드 변경: `80ecec5` `scripts/fetch_face_models.sh`. `dc8cabe` `intent.py`, `tests/test_intent.py`.
+문서: `docs/plans/webapp_plan.md`, `docs/PLAN.md`, `Claude/docs/STATE.md`.
+다음: D1 녹음 뒤 같은 문형을 음성으로 다시 잰다.
 
 ### 2026-10-27 개발 모드 얼굴 상태 표시
 

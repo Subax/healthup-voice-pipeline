@@ -1,7 +1,7 @@
 # webapp_plan — HealthUp 웹 애플리케이션 완성 계획 (마감 2026-10-30)
 
 > 결론: 지금 웹 데모(`src/voice_pipeline/web/`)는 대화 경로가 이미 동작한다. 남은 일은 화면 2모드(개별 기능 토글 포함), 개발 로그, 음성 명령, 세션 시작·종료 흐름이다. 8일(10/23~10/30) 안에 1일 이하 작업 15개로 끝낸다. 얼굴 표정 감정은 동의 조건이 걸린 실험 작업으로 함께 진행한다.
-> 지금 할 일: 웹앱 계획 작업 **A1(`3a7dbcd`)·A2(`73cfbbf`)·B1(`abe1ec7`)·B2(`77e2fd7`)·C1(`5662652`)·C2(`0610ca6`)·C3(`cc1334c`)·C4(`7570ac4`)·F1(`64d9651`)·F2(`b229e02`)**까지 구현·검증·커밋 완료되었다. D2 지연 회귀 집계·판정 스크립트 `bench/d2_summarize.py`(`2ce83bc`, 사용법: `.venv/bin/python bench/d2_summarize.py --mode-a <A_files> --mode-b <B_files>`)가 준비되었으며, D2 실측은 MediRA 5단계 종료 후 진행한다. 남은 작업(**D1·D1b·D2·D3·D4·F3·E1**)은 사용자(녹음/청취/태블릿 실기 평가) 또는 GPU 서비스 기동이 필요하다.
+> 지금 할 일: 웹앱 계획 작업 **A1(`3a7dbcd`)·A2(`73cfbbf`)·B1(`abe1ec7`)·B2(`77e2fd7`)·C1(`5662652`)·C2(`0610ca6`)·C3(`cc1334c`)·C4(`7570ac4`)·F1(`64d9651`)·F2(`b229e02`)**까지 구현·검증·커밋 완료되었다. D2 지연 회귀 집계·판정 스크립트 `bench/d2_summarize.py`(`2ce83bc`, 사용법: `.venv/bin/python bench/d2_summarize.py --mode-a <A_files> --mode-b <B_files>`)가 준비되었으며, D2 실측은 MediRA 5단계 종료 후 진행한다. D1b 텍스트 문형은 `dc8cabe`에서 보강했다. D1 녹음 재실행은 하지 않았다. 남은 작업(D1 녹음, D2 실측, D3, D4, F3, E1)은 사용자 녹음, 청취, 태블릿 또는 GPU 실측이 필요하다.
 >
 > - 작성: 2026-10-22. 사용자 결정 확정: **2026-10-23 02:42**. 코드는 고치지 않았다
 > - 근거: `docs/PLAN.md`, `docs/STATE.md`, `docs/LEGAL_REVIEW.md`, `docs/plans/next_0*.md`, `src/voice_pipeline/web/` 전체, `Claude/docs/STATE.md`
@@ -298,7 +298,7 @@
 | C3 | 10/26 | 의도 연결: 턴 경로, 선행 생성 건너뛰기, 말하는 중 판별, 확인 흐름, 다시 말하기(`_last_bot_text`), 직전 턴 취소(음성 피드백), 처음부터, 모드 전환, 개별 기능 음성 토글(AI 고지 숨김 시 경고 확인 포함), `--no-intent` 인자 | `web/session.py`, `web/__main__.py`, `app.js` | agy Gemini Flash (code) | 통합 시험 9개 통과: ① 명령 턴 LLM 호출 0회 ② 말하는 중 "멈춰" → `interrupt` 1회·새 턴 0 ③ 확인 "아니요" → 세션 유지 ④ "다시 말해 줘" → 직전 답 원문 재생·기록 오염 없음 ⑤ 위기 표현 → LLM 경로 ⑥ 명령 후보 전사로 선행 생성 0회 ⑦ 확인 대기 중 "네"를 맞장구로 버리지 않음 ⑧ 음성으로 개별 기능("개발 정보 보여 줘", "대기 청취 꺼 줘") 즉시 전환 및 "AI 고지 숨겨 줘" 확인 대기 진입 ⑨ mock에서 정지 명령 STT 완료 → `interrupt` 전송 ≤ 50ms | `tests/test_session_commands.py` | ✅ (`cc1334c`) |
 | C4 | 10/27 | 대기 청취 `--wake` (개별 토글 `config.wake` 연동): 첫 터치 화면, 대기 중 `"마이크 대기 중"` 표시, 짧은 발화만 STT, `SESSION_START`만 처리 | `web/session.py`, `app.js`, `web/__main__.py` | agy Gemini Flash (code) | 대기 중 비명령 5발화 → LLM 0회·`transcript` 메시지 0·로그 0줄. 상한보다 긴 발화 → STT 호출 0회. "시작하자" → 진행 + 고지. `config.wake=false` 전환 시 대기 중 STT 호출 0회. 첫 터치 화면은 페이지당 1회 | `tests/test_wake.py` + `bench/web_ui_check.py` | ✅ (`7570ac4`) |
 | D1 | 10/27 | 명령 녹음 평가: 의도 × 표현 5개 × 2회, 비명령 대화 20문장, 위기 흉내 표현 10문장 (연기). 녹음기 수정(5ef4482: Safari 업로드 재시도, 한 번 녹음 후 자동 이동) | 녹음 파일은 `bench/results/intent_wav/` (git 제외). `bench/intent_eval.py --wav-dir`, `bench/d1_recorder.py` | 사용자 (녹음) / agy Gemini Flash (스크립트) / 설계·검토 창 (판정) | SenseVoice 기준 명령 재현율 ≥ 90%, 되돌릴 수 없는 명령 오실행 0 (제안 합격선). 결과 `bench/results/intent_wav_20261027.txt` | 녹음 → STT → 분류 → 혼동표 | 🎙️ |
-| D1b | 10/28 | D1 결과로 문형·표기 변형 보강 | `intent.py` | agy Gemini Flash (code) | D1 재실행에서 합격선 충족. C2 텍스트 세트 합격선 유지 | D1·C2 평가 재실행 | |
+| D1b | 10/28 | 조사, 확인 구어, 위기 어간 보강. D1 녹음 재실행은 녹음 파일이 없어 하지 않았다 | `intent.py` | agy Gemini Flash (code) | C2 텍스트 세트 합격선 유지. D1 재실행 합격선은 확인하지 않았다 | `tests/test_intent.py`, `bench/intent_eval.py` | ⏸️ 텍스트 (`dc8cabe`). D1 녹음 재실행 대기 |
 | F1 | 10/27 | 표정 모델 측정 페이지 (개발 전용, 로컬 서빙, 프레임 전송 없음) | 신규 `web/static/face-probe.html`, `face-probe.js` | agy Gemini Flash (code) / 사용자 (카메라·태블릿) | 후보 3개의 추론 P50·P90, 분석 주기, 로드 시간, 언더런 수를 개발 PC·태블릿에서 기록. 결과 `bench/results/face_probe_20261027.txt`. 후보 1개 선정 | 브라우저에서 측정 페이지 실행 | ✅ (`64d9651`, 사용자 측정 대기) 📷📱 |
 | F2 | 10/28 | 표정 집계·동의(터치 버튼+음성)·서버 합침(`fused_hint`)·개별 토글(`face`) 연결, 개발 패널 표시 | `app.js`, `llm/hint.py`, `web/session.py` | agy Gemini Flash (code) | §4.6 표의 모든 조합 단위 시험 통과. 카메라 켬 1분 동안 브라우저 → 서버 바이너리 메시지가 모두 마이크 PCM 형식(영상 바이트 0). 동의 전 `getUserMedia({video})` 호출 0회. 데모 모드 기본 꺼짐(`face: false`) 및 개별 토글로 on/off 가능 | `tests/test_hint.py` 확장 + `bench/web_ui_check.py` (가짜 카메라 또는 모의 주입 훅) | ✅ (`b229e02`) |
 | D2 | 10/29 | 지연 회귀: 새 기능 켬(`--default-mode dev`·의도 분류) vs 끔(`--no-intent`) | `bench/web_e2e.py`, 신규 `bench/d2_summarize.py` (`2ce83bc`) | 설계·검토 창 / agy Gemini Flash | ABAB 교차 n=16씩. 본문 첫 오디오 P50 차이 ≤ +50ms, 턴 확정 P50 차이 ≤ +20ms. 기준선 P50 1798ms (`docs/STATE.md` §13). 실측은 MediRA 5단계 종료 후 | `CHROME_PATH=<경로> <playwright-venv>/bin/python bench/web_e2e.py <4문장_16k.wav> 4` × 4회 × 2모드. 집계: `.venv/bin/python bench/d2_summarize.py --mode-a <A_files> --mode-b <B_files>` | ⏸️ (`2ce83bc` 준비 완료, 실측 대기) |
@@ -318,7 +318,7 @@
 | 10/25 (일) | C1, C2 | `C1 구현·검증·커밋` (그동안 설계·검토 창이 `bench/intent_set_ko.tsv` 작성) → `C2 구현·검증·커밋` |
 | 10/26 (월) | C3 | `C3 구현·검증·커밋` (`session.py` 의도 및 개별 토글 통합) |
 | 10/27 (화) | C4, D1 🎙️, F1 📷📱 | `C4 구현·검증·커밋` → `F1 구현·커밋` (병행: 사용자 D1 녹음 🎙️ 및 F1 카메라 측정 📷📱) |
-| 10/28 (수) | D1b, F2 | `D1b 구현·검증·커밋` → `F2 구현·검증·커밋` |
+| 10/28 (수) | D1b, F2 | `D1b 텍스트 보강·커밋` (`dc8cabe`, D1 녹음 재실행은 대기) → `F2 구현·검증·커밋` (`b229e02`) |
 | 10/29 (목) | D2, D3 📱, D4 🎧, F3 📷🎧 | D2 자동 벤치 실행 + 사용자 일정에 맞춰 D3·D4·F3 진행 |
 | 10/30 (금) | E1 | 리허설 3회 및 문서 갱신 커밋 |
 
