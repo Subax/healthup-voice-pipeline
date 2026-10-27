@@ -11,7 +11,7 @@
 
 ## 1. 현재 상태 (최종 갱신: 2026-10-27)
 
-이번 세션: 얼굴 표정이 켜지면 대화 칸을 반으로 나눈다. 왼쪽은 대화, 오른쪽은 큰 카메라이다. 개발 모드에서만 얼굴 상자와 상태 패널을 둔다. 카메라가 꺼지면 대화가 전체 폭을 쓴다. 너비 700px 이하는 위아래로 쌓는다. pytest 332 passed. 브라우저 화면은 확인하지 않았다. 웹 서버와 컨테이너는 재시작하거나 멈추지 않았다.
+이번 세션: 페이지의 css, face-api.js, face-hud.js, app.js 주소에 파일 수정 시각 쿼리를 붙인다. `/` 와 `/static/` 응답은 `Cache-Control: no-store` 이다. 서버 Python(`web/app.py`)을 고쳤다. 재시작은 하지 않았다. pytest 335 passed.
 
 **결론**: 지연 개선 코드를 모두 넣었다. 본문 첫 오디오는 P50 1.8초(목표 1.0초)로 아직 미달이다. 남은 병목은 LLM과 같은 GPU를 쓰는 TTS 첫 오디오(약 1.0초)다. 맞장구는 발화 끝 0.35초에 난다.
 남은 일은 대부분 **녹음·청취·태블릿 실기**가 필요하다 (`docs/PLAN.md` §3).
@@ -25,7 +25,7 @@
 **저장소**
 
 - git `main`. 직전 문서 커밋은 `8c5f76a`. 푸시하지 않았다
-- 테스트: 332 passed (`.venv/bin/python -m pytest`, 175.52초). 경고 5건은 기존 `test_tts_cosyvoice.py`의 `NotAppKeyWarning`
+- 테스트: 335 passed (`.venv/bin/python -m pytest`, 175.74초). 경고 5건은 기존 `test_tts_cosyvoice.py`의 `NotAppKeyWarning`
 - 서비스: 이 세션에서 웹 서버와 컨테이너를 재시작하거나 멈추지 않았다. 실행 여부는 확인하지 않았다.
 
 **구현 완료**
@@ -167,6 +167,14 @@
 ---
 
 ## 3. 세션 로그 (최신이 위)
+
+### 2026-10-27 정적 파일 캐시 무효화
+
+한 일: index 응답에 `?v=수정시각` 을 붙인다. 페이지와 `/static/` 은 `Cache-Control: no-store` 이다. 화면 CSS는 `app.css` 로 분리했다.
+확인한 것: `.venv/bin/python -m pytest` 335 passed, 175.74초. `tests/test_static_cache.py` 3 passed.
+확인하지 않은 것: Cloudflare 터널 뒤 태블릿 화면.
+코드 변경: `web/app.py`, `web/static/index.html`, `web/static/app.css`, `tests/test_static_cache.py`, `tests/test_face_hud.py`
+다음: 웹 서버를 재시작한 뒤 터널 주소로 다시 연다.
 
 ### 2026-10-27 대화 칸 옆에 큰 카메라
 

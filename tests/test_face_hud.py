@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HUD = ROOT / "src" / "voice_pipeline" / "web" / "static" / "face-hud.js"
 APP = ROOT / "src" / "voice_pipeline" / "web" / "static" / "app.js"
 HTML = ROOT / "src" / "voice_pipeline" / "web" / "static" / "index.html"
+CSS = ROOT / "src" / "voice_pipeline" / "web" / "static" / "app.css"
 
 
 def _node(body: str) -> str:
@@ -155,11 +156,12 @@ def test_talk_layout_splits_only_while_camera_is_on():
     assert rows[5]["columns"] == 1
     assert rows[5]["showStatus"] is False
 
-    html = HTML.read_text(encoding="utf-8")
-    assert "#talkStage.split { grid-template-columns:1fr 1fr;" in html
-    assert "#talkStage.split { grid-template-columns:1fr; }" in html
-    assert "max-width:700px" in html
-    assert "min-height:320px" in html
+    css = CSS.read_text(encoding="utf-8")
+    assert "#talkStage.split { grid-template-columns:1fr 1fr;" in css
+    assert "#talkStage.split { grid-template-columns:1fr; }" in css
+    assert "max-width:700px" in css
+    assert "min-height:320px" in css
+    assert 'href="/static/app.css"' in HTML.read_text(encoding="utf-8")
     app = APP.read_text(encoding="utf-8")
     assert "talkLayout" in app
     assert 'classList.toggle("split"' in app

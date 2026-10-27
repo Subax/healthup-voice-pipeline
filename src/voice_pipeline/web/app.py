@@ -21,9 +21,50 @@ SESSIONS = web.AppKey("sessions", set)
 STATIC = Path(__file__).parent / "static"
 log = logging.getLogger("voice_pipeline.web")
 
+# 페이지가 부르는 정적 파일. 쿼리의 수정 시각이 바뀌면 터널 캐시를 피한다.
+INDEX_ASSETS = (
+    "/static/app.css",
+    "/static/vendor/face-api/face-api.js",
+    "/static/face-hud.js",
+    "/static/app.js",
+)
 
-async def index(request: web.Request) -> web.FileResponse:
-    return web.FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+
+def asset_version(path: Path) -> str:
+    """파일 수정 시각(초). 파일이 없으면 0."""
+    try:
+        return str(int(path.stat().st_mtime))
+    except OSError:
+        return "0"
+
+
+def stamp_index_html(html: str, static_dir: Path = STATIC) -> str:
+    """index.html의 정적 주소에 ?v=수정시각 을 붙인다."""
+    for url in sorted(INDEX_ASSETS, key=len, reverse=True):
+        rel = url.removeprefix("/static/")
+        ver = asset_version(static_dir / rel)
+        html = html.replace(f'"{url}"', f'"{url}?v={ver}"', 1)
+    return html
+
+
+@web.middleware
+async def _no_store_static(request: web.Request, handler):
+    """페이지와 /static/ 은 저장하지 않는다."""
+    response = await handler(request)
+    if request.path == "/" or request.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+async def index(request: web.Request) -> web.Response:
+    raw = (STATIC / "index.html").read_text(encoding="utf-8")
+    body = stamp_index_html(raw)
+    return web.Response(
+        text=body,
+        content_type="text/html",
+        charset="utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def _pong(ws: web.WebSocketResponse, raw: str) -> bool:
@@ -73,7 +114,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
 
 def create_app(engines: Engines, *, warmup: bool = True, auth_token: str | None = None) -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[_no_store_static])
     app[ENGINES] = engines
     app[SESSIONS] = set()
     if auth_token:
