@@ -14,6 +14,15 @@ let totalSpeechFrames = 0;
 let faceConsented = !!sessionStorage.getItem("healthup_face_consent");
 let faceModelLoading = false;
 let faceModelFailed = false;
+let faceLandmarksReady = false;
+let faceLandmarkMissing = false;
+let faceAnalyzing = false;
+let faceCameraState = "대기";
+let faceCameraError = "";
+let faceFpsMarks = [];
+let lastFaceSent = null;
+let lastFaceSentAt = "";
+let faceHudLive = { detected: false, score: null, faceCount: 0, emotions: [], fps: null };
 let cur = null;             // 현재 재생 중인 턴
 const deadTurns = new Set();
 let wantRun = false;        // 「시작」을 눌러 실행 중 (끊기면 재연결한다)
@@ -104,6 +113,10 @@ function applyVisibility() {
   if ($("prefCameraBadge")) $("prefCameraBadge").checked = !!prefs.show_camera_badge;
   if ($("prefConnStatus")) $("prefConnStatus").checked = !!prefs.show_conn_status;
   if ($("prefDevInfo")) $("prefDevInfo").checked = !!prefs.show_dev_info;
+
+  // 얼굴 상태 패널은 개발 모드에서만 보인다. 데모의 개발 정보 토글로는 열지 않는다.
+  if ($("faceHud")) $("faceHud").hidden = !window.FaceHud || !window.FaceHud.faceHudVisible(currentMode);
+  renderFaceHud();
 }
 
 // ---------- UI ----------
@@ -419,14 +432,16 @@ function onMessage(ev) {
           const avgConf = confSums[dominant] / maxCount;
           const totalFrames = Math.max(totalSpeechFrames, faceFrames.length, 1);
           const coverage = Math.min(1.0, maxCount / totalFrames);
-          send({
+          const faceSummary = {
             type: "face_summary",
             label: dominant,
             conf: Math.round(avgConf * 100) / 100,
             coverage: Math.round(coverage * 100) / 100,
             n_frames: faceFrames.length,
             total_frames: totalFrames,
-          });
+          };
+          rememberFaceSummary(faceSummary);
+          send(faceSummary);
         }
         faceFrames = [];
         totalSpeechFrames = 0;
@@ -616,21 +631,153 @@ function stopAll() {
 }
 
 // ---------- 얼굴 표정 카메라 및 모델 제어 (F2) ----------
-async function loadFaceModelIfNeeded() {
-  if (window.faceapi && !window.faceapi.nets.tinyFaceDetector.params && !faceModelLoading) {
-    try {
-      faceModelLoading = true;
-      await window.faceapi.nets.tinyFaceDetector.loadFromUri("/static/models/face-api");
-      await window.faceapi.nets.faceExpressionNet.loadFromUri("/static/models/face-api");
-      faceModelFailed = false;
-      addMsg("dev", "[표정 모델] face-api 로컬 모델 로드 완료");
-    } catch (e) {
-      faceModelFailed = true;
-      console.warn("face-api 모델 로드 실패:", e);
-      addMsg("dev", `[표정 모델] 모델 로드 실패: ${e.message || e} (표정 분석 비활성화)`);
-    } finally {
-      faceModelLoading = false;
+function faceEngineLabel() {
+  if (!window.faceapi) return "없음";
+  if (faceModelFailed) return "face-api, 모델 없음";
+  if (faceLandmarkMissing) return "face-api, 랜드마크 없음";
+  return "face-api";
+}
+
+function renderFaceHud(patch) {
+  if (patch) Object.assign(faceHudLive, patch);
+  if (currentMode !== "dev" || !$("faceHud") || !window.FaceHud) return;
+  const view = window.FaceHud.lines({
+    detected: faceHudLive.detected,
+    score: faceHudLive.score,
+    faceCount: faceHudLive.faceCount,
+    emotions: faceHudLive.emotions,
+    fps: faceHudLive.fps,
+    lastSent: lastFaceSent,
+    lastSentAt: lastFaceSentAt,
+    engine: faceEngineLabel(),
+    camera: faceCameraState,
+    cameraError: faceCameraError,
+  });
+  const fields = {
+    faceHudDetected: view.detected,
+    faceHudScore: view.score,
+    faceHudCount: view.count,
+    faceHudEmotions: view.emotions,
+    faceHudFps: view.fps,
+    faceHudLast: view.lastSent,
+    faceHudEngine: view.engine,
+    faceHudCamera: view.camera,
+  };
+  for (const id in fields) {
+    const el = $(id);
+    if (el) el.textContent = fields[id];
+  }
+}
+
+function rememberFaceSummary(summary) {
+  lastFaceSent = {
+    label: summary.label,
+    conf: summary.conf,
+    coverage: summary.coverage,
+    n_frames: summary.n_frames,
+    total_frames: summary.total_frames,
+  };
+  lastFaceSentAt = new Date().toLocaleTimeString("ko-KR", { hour12: false });
+  renderFaceHud();
+}
+
+function noteFaceFps() {
+  const now = performance.now();
+  faceFpsMarks.push(now);
+  while (faceFpsMarks.length && now - faceFpsMarks[0] > 1000) faceFpsMarks.shift();
+  faceHudLive.fps = faceFpsMarks.length;
+}
+
+function clearFaceOverlay() {
+  const canvas = $("faceOverlay");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+function drawFaceOverlay(video, faces) {
+  const canvas = $("faceOverlay");
+  if (!canvas || !video) return;
+  const rect = canvas.getBoundingClientRect();
+  const cw = Math.max(1, Math.round(rect.width));
+  const ch = Math.max(1, Math.round(rect.height));
+  if (canvas.width !== cw) canvas.width = cw;
+  if (canvas.height !== ch) canvas.height = ch;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.clearRect(0, 0, cw, ch);
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  if (!vw || !vh || !faces || !faces.length) return;
+  const scale = Math.max(cw / vw, ch / vh);
+  const ox = (cw - vw * scale) / 2;
+  const oy = (ch - vh * scale) / 2;
+  for (const face of faces) {
+    const box = face.detection && face.detection.box;
+    if (box) {
+      ctx.strokeStyle = "#2f6fed";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(ox + box.x * scale, oy + box.y * scale, box.width * scale, box.height * scale);
     }
+    const pts = face.landmarks && face.landmarks.positions;
+    if (pts && pts.length) {
+      ctx.fillStyle = "#46c27d";
+      for (const p of pts) {
+        ctx.fillRect(ox + p.x * scale - 1, oy + p.y * scale - 1, 2, 2);
+      }
+    }
+  }
+}
+
+function emotionRows(expressions) {
+  if (!expressions || typeof expressions.asSortedArray !== "function") return [];
+  return expressions.asSortedArray().slice(0, 3).map((row) => ({
+    label: String(row.expression || "").toUpperCase(),
+    score: row.probability,
+  }));
+}
+
+function pushFaceFrame(expressions) {
+  const rows = emotionRows(expressions);
+  if (!rows.length) return;
+  faceFrames.push({
+    label: rows[0].label,
+    conf: Math.round(rows[0].score * 100) / 100,
+  });
+}
+
+async function loadFaceModelIfNeeded() {
+  if (!window.faceapi || faceModelLoading) return;
+  const nets = window.faceapi.nets;
+  const needDetector = !nets.tinyFaceDetector.params;
+  const needExpr = !nets.faceExpressionNet.params;
+  const needLandmark = !faceLandmarksReady && !faceLandmarkMissing && nets.faceLandmark68TinyNet && !nets.faceLandmark68TinyNet.params;
+  if (!needDetector && !needExpr && !needLandmark) return;
+  faceModelLoading = true;
+  try {
+    if (needDetector) await nets.tinyFaceDetector.loadFromUri("/static/models/face-api");
+    if (needExpr) await nets.faceExpressionNet.loadFromUri("/static/models/face-api");
+    faceModelFailed = false;
+    addMsg("dev", "[표정 모델] face-api 로컬 모델 로드 완료");
+    if (needLandmark) {
+      try {
+        await nets.faceLandmark68TinyNet.loadFromUri("/static/models/face-api");
+        faceLandmarksReady = !!nets.faceLandmark68TinyNet.params;
+        faceLandmarkMissing = !faceLandmarksReady;
+      } catch (e) {
+        faceLandmarksReady = false;
+        faceLandmarkMissing = true;
+        console.warn("랜드마크 모델 로드 실패:", e);
+      }
+    }
+  } catch (e) {
+    faceModelFailed = true;
+    faceCameraError = (e && e.message) || String(e);
+    console.warn("face-api 모델 로드 실패:", e);
+    addMsg("dev", `[표정 모델] 모델 로드 실패: ${e.message || e} (표정 분석 비활성화)`);
+  } finally {
+    faceModelLoading = false;
+    renderFaceHud();
   }
 }
 
@@ -641,15 +788,22 @@ async function startCamera() {
     faceStream = await navigator.mediaDevices.getUserMedia({
       video: { width: { ideal: 640 }, height: { ideal: 480 } }
     });
+    faceCameraState = "허용";
+    faceCameraError = "";
     if (video) {
       video.srcObject = faceStream;
       video.play().catch(() => {});
     }
+    renderFaceHud();
     loadFaceModelIfNeeded();
     if (faceIntervalId) clearInterval(faceIntervalId);
     faceIntervalId = setInterval(analyzeFaceFrame, 100);
   } catch (err) {
+    const name = err && err.name;
+    faceCameraState = (name === "NotAllowedError" || name === "PermissionDeniedError") ? "거부" : "오류";
+    faceCameraError = (err && (err.message || err.name)) || "카메라 오류";
     console.warn("카메라 활성화 실패:", err);
+    renderFaceHud();
   }
 }
 
@@ -668,35 +822,68 @@ function stopCamera() {
   }
   faceFrames = [];
   totalSpeechFrames = 0;
+  faceCameraState = "대기";
+  faceCameraError = "";
+  faceHudLive = { detected: false, score: null, faceCount: 0, emotions: [], fps: null };
+  clearFaceOverlay();
+  renderFaceHud();
 }
 
 async function analyzeFaceFrame() {
-  if (faceModelFailed) return;
-  if (speakingLocal) {
-    totalSpeechFrames++;
-  }
-  if (window._mockFaceEmotion && speakingLocal) {
-    faceFrames.push({ label: window._mockFaceEmotion, conf: window._mockFaceConf || 0.85 });
+  if (faceAnalyzing) return;
+  if (faceModelFailed) {
+    renderFaceHud({ detected: false, score: null, faceCount: 0, emotions: [] });
     return;
   }
-  const video = $("faceVideo");
-  if (!video || video.readyState < 2) return;
-  if (!speakingLocal) return;
+  faceAnalyzing = true;
   try {
-    if (window.faceapi && window.faceapi.nets.tinyFaceDetector.params) {
-      const detection = await window.faceapi.detectSingleFace(video, new window.faceapi.TinyFaceDetectorOptions()).withFaceExpressions();
-      if (detection && detection.expressions) {
-        const sorted = detection.expressions.asSortedArray();
-        if (sorted.length > 0) {
-          faceFrames.push({
-            label: sorted[0].expression.toUpperCase(),
-            conf: Math.round(sorted[0].probability * 100) / 100
-          });
-        }
-      }
+    if (speakingLocal) totalSpeechFrames++;
+    if (window._mockFaceEmotion && speakingLocal) {
+      const conf = window._mockFaceConf || 0.85;
+      faceFrames.push({ label: window._mockFaceEmotion, conf: conf });
+      noteFaceFps();
+      renderFaceHud({
+        detected: true,
+        score: conf,
+        faceCount: 1,
+        emotions: [{ label: String(window._mockFaceEmotion).toUpperCase(), score: conf }],
+      });
+      return;
     }
+    const video = $("faceVideo");
+    if (!video || video.readyState < 2) return;
+    const showHud = currentMode === "dev";
+    if (!speakingLocal && !showHud) return;
+    if (!window.faceapi || !window.faceapi.nets.tinyFaceDetector.params) return;
+    const opts = new window.faceapi.TinyFaceDetectorOptions();
+    if (!showHud) {
+      const detection = await window.faceapi.detectSingleFace(video, opts).withFaceExpressions();
+      if (speakingLocal && detection && detection.expressions) pushFaceFrame(detection.expressions);
+      return;
+    }
+    let task = window.faceapi.detectAllFaces(video, opts);
+    if (faceLandmarksReady) task = task.withFaceLandmarks(true);
+    const faces = await task.withFaceExpressions();
+    noteFaceFps();
+    drawFaceOverlay(video, faces);
+    const best = (faces || []).slice().sort((a, b) => {
+      const as = (a.detection && a.detection.score) || 0;
+      const bs = (b.detection && b.detection.score) || 0;
+      return bs - as;
+    })[0];
+    if (speakingLocal && best && best.expressions) pushFaceFrame(best.expressions);
+    if (faceCameraState === "허용") faceCameraError = "";
+    renderFaceHud({
+      detected: !!(faces && faces.length),
+      score: best && best.detection ? best.detection.score : null,
+      faceCount: faces ? faces.length : 0,
+      emotions: best ? emotionRows(best.expressions) : [],
+    });
   } catch (e) {
-    // 프레임 분석 오류 무시
+    faceCameraError = (e && e.message) || String(e);
+    renderFaceHud({ detected: false, score: null, faceCount: 0, emotions: [] });
+  } finally {
+    faceAnalyzing = false;
   }
 }
 
@@ -713,13 +900,16 @@ function setFaceEnabled(enabled) {
 }
 
 window.injectFaceSummary = function(summary) {
-  send({
+  const payload = {
     type: "face_summary",
     label: summary.label || "HAPPY",
     conf: summary.conf != null ? summary.conf : 0.9,
     coverage: summary.coverage != null ? summary.coverage : 0.8,
-    n_frames: summary.n_frames != null ? summary.n_frames : 10
-  });
+    n_frames: summary.n_frames != null ? summary.n_frames : 10,
+    total_frames: summary.total_frames != null ? summary.total_frames : 10,
+  };
+  rememberFaceSummary(payload);
+  send(payload);
 };
 window.setMockFaceEmotion = function(label, conf) {
   window._mockFaceEmotion = label;

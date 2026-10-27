@@ -102,6 +102,7 @@ async def check_2_demo_onhello_hidden(page) -> None:
     assert "llm=mock" in engines_text, f"#engines 텍스트 미수신: {engines_text}"
 
     assert not await page.is_visible("#engines"), "onHello 후 데모 모드에서 #engines가 숨겨져야 함"
+    assert not await page.is_visible("#faceHud"), "데모 모드에서 #faceHud는 숨겨져야 함"
     assert not await page.is_visible("#voiceWrap"), "onHello 후 데모 모드에서 #voiceWrap이 숨겨져야 함"
     assert not await page.is_visible("#sttWrap"), "onHello 후 데모 모드에서 #sttWrap이 숨겨져야 함"
     assert not await page.is_visible("#epWrap"), "onHello 후 데모 모드에서 #epWrap이 숨겨져야 함"
@@ -130,6 +131,9 @@ async def check_3_dev_mode(page) -> None:
 
     # 데모 전용 자리표시 카드는 숨김 확인
     assert not await page.is_visible("#avatarCard"), "개발 모드에서 #avatarCard는 숨겨져야 함"
+    assert await page.is_visible("#faceHud"), "개발 모드에서 #faceHud가 보여야 함"
+    hud_engine = (await page.text_content("#faceHudEngine") or "").strip()
+    assert hud_engine.startswith("face-api") or hud_engine == "없음", f"엔진 표시가 비어 있거나 예상 밖: {hud_engine}"
 
 
 async def check_4_config_on_toggle(page, ws_sent: list[str]) -> None:
