@@ -21,42 +21,129 @@ import time
 import numpy as np
 
 # model.tts(stream=True) 는 speed 를 token2wav 에 넘기지 않는다.
-# 비스트림만 마지막 mel 길이를 줄인다. 그래서 나온 파형을 여기서 줄인다.
+# 비스트림만 마지막 mel 길이를 줄인다. 선형 리샘플은 음 높이를 올리므로 WSOLA 로 길이를 줄인다.
 SPEECH_SPEED = float(os.environ.get("CV_SPEED", "1.2"))
 
 
 class StreamSpeed:
-    """청크를 이어서 읽어 길이를 1/speed 로 줄인다. 샘플레이트는 그대로다."""
+    """WSOLA로 파형을 1/speed 길이로 줄인다. 샘플레이트와 음 높이는 유지한다."""
 
-    def __init__(self, speed: float = SPEECH_SPEED):
+    def __init__(self, speed: float = SPEECH_SPEED, sample_rate: int = 24000):
         self.speed = float(speed)
-        self._buf = np.zeros(0, dtype=np.float64)
-        self._origin = 0.0
-        self._out_pos = 0.0
+        self.sr = int(sample_rate)
+        self.win = max(8, int(round(0.020 * self.sr)))
+        self.synth_hop = max(1, self.win // 2)
+        self.ana_hop = max(1, int(round(self.synth_hop * self.speed)))
+        self.search = max(1, int(round(0.005 * self.sr)))
+        self._win_fn = np.hanning(self.win).astype(np.float64)
+        self._in = np.zeros(0, dtype=np.float64)
+        self._out = np.zeros(0, dtype=np.float64)
+        self._norm = np.zeros(0, dtype=np.float64)
+        self._ana = 0
+        self._syn = 0
+        self._primed = False
 
     def push(self, wav: np.ndarray) -> np.ndarray:
         if self.speed == 1.0:
-            return np.asarray(wav)
+            return np.asarray(wav, dtype=np.float32).reshape(-1)
         wav = np.asarray(wav, dtype=np.float64).reshape(-1)
-        if wav.size == 0 and self._buf.size == 0:
+        if wav.size:
+            self._in = np.concatenate([self._in, wav])
+        self._drain(allow_short=False)
+        self._trim_in()
+        return self._emit_stable()
+
+    def flush(self) -> np.ndarray:
+        """입력 끝에 남은 샘플을 내보낸다."""
+        if self.speed == 1.0:
             return np.zeros(0, dtype=np.float32)
-        self._buf = np.concatenate([self._buf, wav])
-        out: list[float] = []
-        end = self._origin + self._buf.size - 1
-        while self._out_pos <= end:
-            i = int(np.floor(self._out_pos - self._origin))
-            frac = self._out_pos - self._origin - i
-            if i + 1 >= self._buf.size:
+        parts: list[np.ndarray] = []
+        for _ in range(10000):
+            if self._in.size < self._ana + self.win:
                 break
-            out.append((1.0 - frac) * self._buf[i] + frac * self._buf[i + 1])
-            self._out_pos += self.speed
-        keep = int(np.floor(self._out_pos - self._origin))
-        if keep > 0:
-            self._origin += keep
-            self._buf = self._buf[keep:]
-        if not out:
+            before = self._ana
+            self._drain(allow_short=True)
+            piece = self._emit_stable()
+            if piece.size:
+                parts.append(piece)
+            if self._ana <= before:
+                break
+        if self._out.size:
+            raw = self._out / np.maximum(self._norm, 1e-8)
+            parts.append(raw.astype(np.float32))
+        self._out = np.zeros(0, dtype=np.float64)
+        self._norm = np.zeros(0, dtype=np.float64)
+        self._in = np.zeros(0, dtype=np.float64)
+        self._ana = 0
+        self._syn = 0
+        self._primed = False
+        if not parts:
             return np.zeros(0, dtype=np.float32)
-        return np.asarray(out, dtype=np.float32)
+        return np.concatenate(parts)
+
+    def _drain(self, allow_short: bool) -> None:
+        if not self._primed and self._in.size >= self.win and (allow_short or self._in.size >= self.win + self.search):
+            self._place(0, 0)
+            self._ana = self.ana_hop
+            self._syn = self.synth_hop
+            self._primed = True
+        while True:
+            need = self.win if allow_short else self.win + self.search
+            if self._ana + need > self._in.size or not self._primed:
+                return
+            center = min(self._ana, self._in.size - self.win)
+            if allow_short and self._ana + self.win + self.search > self._in.size:
+                best = center
+            else:
+                best = self._best(center)
+            self._place(best, self._syn)
+            nxt = max(self._ana + 1, best + self.ana_hop)
+            self._ana = nxt
+            self._syn += self.synth_hop
+
+    def _best(self, center: int) -> int:
+        overlap = self.win - self.synth_hop
+        lo = max(0, center - self.search)
+        hi = min(self._in.size - self.win, center + self.search)
+        if hi <= lo:
+            return max(0, min(center, self._in.size - self.win))
+        target = self._out[self._syn:self._syn + overlap]
+        if target.size < overlap or float(np.dot(target, target)) < 1e-8:
+            return center
+        region = self._in[lo:hi + overlap]
+        windows = np.lib.stride_tricks.sliding_window_view(region, overlap)
+        scores = windows @ target
+        scores = scores / (np.linalg.norm(windows, axis=1) + 1e-9)
+        return lo + int(np.argmax(scores))
+
+    def _place(self, pos: int, syn: int) -> None:
+        seg = self._in[pos:pos + self.win] * self._win_fn
+        end = syn + self.win
+        if self._out.size < end:
+            pad = end - self._out.size
+            self._out = np.pad(self._out, (0, pad))
+            self._norm = np.pad(self._norm, (0, pad))
+        self._out[syn:end] += seg
+        self._norm[syn:end] += self._win_fn
+
+    def _emit_stable(self) -> np.ndarray:
+        end = min(self._syn, self._out.size)
+        if end <= 0:
+            return np.zeros(0, dtype=np.float32)
+        chunk = self._out[:end] / np.maximum(self._norm[:end], 1e-8)
+        self._out = self._out[end:]
+        self._norm = self._norm[end:]
+        self._syn -= end
+        if chunk.size == 0:
+            return np.zeros(0, dtype=np.float32)
+        return chunk.astype(np.float32)
+
+    def _trim_in(self) -> None:
+        keep = max(0, self._ana - self.search)
+        if keep <= 0:
+            return
+        self._in = self._in[keep:]
+        self._ana -= keep
 
 
 import torch
@@ -116,7 +203,7 @@ KO_TEXT_B = SYS + "<|endofprompt|>당신에게 마음을 움직이는 목소리�
 # text 는 zero_shot 이면 프롬프트 전사, instruct 이면 지시문이다 (모두 <|endofprompt|> 포함).
 PRESETS: dict[str, dict] = {
     "calm": {"label": "차분하게", "wav": KO_WAV_A, "mode": "instruct",
-             "text": SYS + " 请用温柔、平静的语气，非常轻声、缓慢地说话。<|endofprompt|>"},
+             "text": SYS + " 请用温柔、平静的语气，非常轻声地、以平常的语速说话。<|endofprompt|>"},
     # 톤 프리셋(자동 톤 선택용, 같은 화자)
     "comfort": {"label": "위로하는", "wav": KO_WAV_A, "mode": "instruct",
                 "text": SYS + " 请用温柔、体贴的语气，轻轻地、慢慢地说话。<|endofprompt|>"},
@@ -477,7 +564,7 @@ class Engine:
         except Exception:  # noqa: BLE001
             log.warning("text_frontend 실패, 정규화 없이 합성: %s", text)
             segs = self.cv.frontend.text_normalize(text, split=True, text_frontend=False)
-        speeder = StreamSpeed(SPEECH_SPEED)
+        speeder = StreamSpeed(SPEECH_SPEED, self.sample_rate)
         try:
             for seg in segs:
                 if cancel.is_set():
@@ -487,7 +574,7 @@ class Engine:
                 if self._prof and "t_tts_enter" not in self._prof:
                     self._prof["t_tts_enter"] = t_enter
                     self._prof["frontend_ms"] = (t_enter - self._prof.get("t_synth", t_enter)) * 1000
-                # stream=True 경로는 speed 인자를 무시한다. 파형 길이는 StreamSpeed 가 줄인다.
+                # stream=True 경로는 speed 인자를 무시한다. 길이는 WSOLA 가 줄이고 음 높이는 유지한다.
                 gen = self.cv.model.tts(**self._model_input(preset, seg), stream=True, speed=1.0)
                 try:
                     for out in gen:
@@ -502,6 +589,10 @@ class Engine:
                     break
                 finally:
                     gen.close()
+            if not cancel.is_set():
+                tail = speeder.flush()
+                if tail.size:
+                    yield (np.clip(tail, -1.0, 1.0) * 32767).astype("<i2").tobytes()
         finally:
             cancel.set()
             # (2) llm_job 종료를 이벤트로 대기

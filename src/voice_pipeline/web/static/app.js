@@ -1,6 +1,7 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
-const JITTER = 0.06;        // 초기 지터 버퍼 (초)
+const PREBUFFER_SEC = 0.20; // 재생 시작 전 선버퍼 (초). 150~250ms
+const EDGE_FADE_SEC = 0.008; // 청크 경계 페이드 (초)
 const PROGRESS_MS = 100;    // 재생 위치 보고 주기
 const DUCK_GAIN = 0.25;     // 사용자가 말하기 시작하면 낮추는 음량 (덕킹)
 
@@ -246,12 +247,84 @@ function playedMs(t) {
 }
 function stopTimers(t) { clearInterval(t.prog); clearTimeout(t.startTimer); clearTimeout(t.finTimer); }
 
+function shouldHold(queuedSec, ended) {
+  return !ended && queuedSec < PREBUFFER_SEC;
+}
+function planFrameStart(prev, frameSec, now) {
+  const fade = EDGE_FADE_SEC;
+  const primed = !!(prev && prev.primed);
+  const cursor = prev && prev.cursor ? prev.cursor : 0;
+  if (!primed) {
+    const startAt = now + 0.02;
+    return { startAt: startAt, fadeIn: false, fadeOut: true, cursor: startAt + frameSec, primed: true, fadeSec: fade };
+  }
+  if (cursor > now + 0.005) {
+    const startAt = Math.max(now, cursor - fade);
+    return { startAt: startAt, fadeIn: true, fadeOut: true, cursor: startAt + frameSec, primed: true, fadeSec: fade };
+  }
+  const startAt = now;
+  return { startAt: startAt, fadeIn: true, fadeOut: true, cursor: startAt + frameSec, primed: true, fadeSec: fade };
+}
+function applyEdgeFade(ab, fadeIn, fadeOut) {
+  const f = ab.getChannelData(0);
+  const n = f.length;
+  const fadeN = Math.min(Math.floor(ab.sampleRate * EDGE_FADE_SEC), Math.floor(n / 2));
+  if (fadeN <= 0) return;
+  if (fadeIn) {
+    for (let i = 0; i < fadeN; i++) f[i] *= i / fadeN;
+  }
+  if (fadeOut) {
+    for (let i = 0; i < fadeN; i++) f[n - 1 - i] *= i / fadeN;
+  }
+}
+function scheduleBuffer(turn, ab, plan) {
+  applyEdgeFade(ab, plan.fadeIn, plan.fadeOut);
+  const src = ctx.createBufferSource();
+  src.buffer = ab;
+  src.connect(turn.gain);
+  const now = ctx.currentTime;
+  src.start(plan.startAt);
+  const d = ab.length / turn.rate;
+  turn.cursor = plan.cursor;
+  turn.primed = true;
+  turn.totalMs += d * 1000;
+  turn.chunks.push({ t: plan.startAt, d: d });
+  turn.sources.push(src);
+  if (turn.chunks.length === 1) {
+    const turnRef = turn;
+    const startAt = plan.startAt;
+    turnRef.startTimer = setTimeout(() => {
+      if (turnRef.dead) return;
+      turnRef.started = true;
+      send({ type: "playback", turn_id: turnRef.id, event: "started", played_ms: 0 });
+      turnRef.prog = setInterval(() => {
+        send({ type: "playback", turn_id: turnRef.id, event: "progress", played_ms: playedMs(turnRef) });
+        if ($("avatarLevel") && speakingLocal) {
+          $("avatarLevel").style.width = Math.min(100, Math.max(20, Math.random() * 70 + 20)) + "%";
+        }
+      }, PROGRESS_MS);
+    }, Math.max(0, (startAt - now) * 1000));
+  }
+}
+function flushQueue(turn, ended) {
+  if (!turn || turn.dead) return;
+  if (shouldHold(turn.queuedSec, ended)) return;
+  const now = ctx.currentTime;
+  while (turn.queue.length) {
+    const ab = turn.queue.shift();
+    const frameSec = ab.length / turn.rate;
+    const plan = planFrameStart({ primed: turn.primed, cursor: turn.cursor }, frameSec, now);
+    scheduleBuffer(turn, ab, plan);
+  }
+  turn.queuedSec = 0;
+}
 function onBegin(m) {
   if (master) master.gain.setTargetAtTime(1, ctx.currentTime, 0.01);   // 덕킹 해제
   if (cur && !cur.dead) killTurn(cur, 0, false);
   const gain = ctx.createGain(); gain.connect(master);
   cur = { id: m.turn_id, rate: m.sample_rate, gain, cursor: 0, chunks: [], ptr: 0, doneMs: 0, totalMs: 0,
-          sources: [], started: false, dead: false, prog: null, startTimer: null, finTimer: null };
+          sources: [], started: false, dead: false, prog: null, startTimer: null, finTimer: null,
+          queue: [], queuedSec: 0, primed: false };
   speakingLocal = true; setBadge();
   if ($("avatarVolWrap")) $("avatarVolWrap").hidden = false;
 }
@@ -265,33 +338,14 @@ function onFrame(buf) {
   const ab = ctx.createBuffer(1, n, cur.rate);
   const f = ab.getChannelData(0);
   for (let i = 0; i < n; i++) f[i] = pcm[i] / 32768;
-  const src = ctx.createBufferSource(); src.buffer = ab; src.connect(cur.gain);
-  const now = ctx.currentTime;
-  let t = cur.cursor;
-  if (!cur.started && cur.chunks.length === 0) t = now + JITTER;
-  else if (t < now + 0.005) t = now + 0.02;
-  src.start(t);
-  const d = n / cur.rate;
-  cur.cursor = t + d; cur.totalMs += d * 1000;
-  cur.chunks.push({ t, d }); cur.sources.push(src);
-  if (cur.chunks.length === 1) {
-    const turn = cur;
-    turn.startTimer = setTimeout(() => {
-      if (turn.dead) return;
-      turn.started = true;
-      send({ type: "playback", turn_id: turn.id, event: "started", played_ms: 0 });
-      turn.prog = setInterval(() => {
-        send({ type: "playback", turn_id: turn.id, event: "progress", played_ms: playedMs(turn) });
-        if ($("avatarLevel") && speakingLocal) {
-          $("avatarLevel").style.width = Math.min(100, Math.max(20, Math.random() * 70 + 20)) + "%";
-        }
-      }, PROGRESS_MS);
-    }, Math.max(0, (t - now) * 1000));
-  }
+  cur.queue.push(ab);
+  cur.queuedSec += n / cur.rate;
+  flushQueue(cur, false);
 }
 function onEnd(m) {
   const t = cur;
   if (!t || t.id !== m.turn_id || t.dead) return;
+  flushQueue(t, true);
   t.finTimer = setTimeout(() => {
     if (t.dead) return;
     stopTimers(t);
