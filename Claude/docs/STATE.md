@@ -11,7 +11,7 @@
 
 ## 1. 현재 상태 (최종 갱신: 2026-10-27)
 
-이번 세션: 페이지의 css, face-api.js, face-hud.js, app.js 주소에 파일 수정 시각 쿼리를 붙인다. `/` 와 `/static/` 응답은 `Cache-Control: no-store` 이다. 서버 Python(`web/app.py`)을 고쳤다. 재시작은 하지 않았다. pytest 335 passed.
+이번 세션: TTS 스트리밍 말 속도를 1.2로 올렸다. `model.tts(stream=True)`는 speed 인자를 쓰지 않아 파형 길이를 줄인다. CosyVoice 컨테이너는 재시작하지 않았다. vLLM은 기본 모델 `nvidia/Qwen3.8-27B-NVFP4`이다. LoRA는 없다.
 
 **결론**: 지연 개선 코드를 모두 넣었다. 본문 첫 오디오는 P50 1.8초(목표 1.0초)로 아직 미달이다. 남은 병목은 LLM과 같은 GPU를 쓰는 TTS 첫 오디오(약 1.0초)다. 맞장구는 발화 끝 0.35초에 난다.
 남은 일은 대부분 **녹음·청취·태블릿 실기**가 필요하다 (`docs/PLAN.md` §3).
@@ -25,7 +25,7 @@
 **저장소**
 
 - git `main`. 직전 문서 커밋은 `8c5f76a`. 푸시하지 않았다
-- 테스트: 335 passed (`.venv/bin/python -m pytest`, 175.74초). 경고 5건은 기존 `test_tts_cosyvoice.py`의 `NotAppKeyWarning`
+- 테스트: 337 passed (`.venv/bin/python -m pytest`, 176.89초). 경고 5건은 기존 `test_tts_cosyvoice.py`의 `NotAppKeyWarning`
 - 서비스: 이 세션에서 웹 서버와 컨테이너를 재시작하거나 멈추지 않았다. 실행 여부는 확인하지 않았다.
 
 **구현 완료**
@@ -167,6 +167,13 @@
 ---
 
 ## 3. 세션 로그 (최신이 위)
+
+### 2026-10-27 TTS 말 속도, vLLM 모델 확인
+
+한 일: `CV_SPEED` 기본 1.2. 스트리밍 청크를 이어서 줄인다. vLLM `/v1/models`와 실행 인자를 읽었다.
+확인한 것: `.venv/bin/python -m pytest` 337 passed, 176.89초. 서빙 모델 id는 `Qwen/Qwen3.8-27B`, root는 `nvidia/Qwen3.8-27B-NVFP4`. `--lora-modules` 없음. 앱 요청 이름과 같다.
+확인하지 않은 것: 재시작 뒤 청취. 파인튜닝 가중치 파일은 `llm-finetune-research/FINETUNE_PLAN.md`만 있고 체크포인트는 찾지 못했다.
+다음: CosyVoice 컨테이너를 다시 띄운 뒤 말 속도를 듣는다.
 
 ### 2026-10-27 정적 파일 캐시 무효화
 

@@ -19,6 +19,46 @@ import threading
 import time
 
 import numpy as np
+
+# model.tts(stream=True) 는 speed 를 token2wav 에 넘기지 않는다.
+# 비스트림만 마지막 mel 길이를 줄인다. 그래서 나온 파형을 여기서 줄인다.
+SPEECH_SPEED = float(os.environ.get("CV_SPEED", "1.2"))
+
+
+class StreamSpeed:
+    """청크를 이어서 읽어 길이를 1/speed 로 줄인다. 샘플레이트는 그대로다."""
+
+    def __init__(self, speed: float = SPEECH_SPEED):
+        self.speed = float(speed)
+        self._buf = np.zeros(0, dtype=np.float64)
+        self._origin = 0.0
+        self._out_pos = 0.0
+
+    def push(self, wav: np.ndarray) -> np.ndarray:
+        if self.speed == 1.0:
+            return np.asarray(wav)
+        wav = np.asarray(wav, dtype=np.float64).reshape(-1)
+        if wav.size == 0 and self._buf.size == 0:
+            return np.zeros(0, dtype=np.float32)
+        self._buf = np.concatenate([self._buf, wav])
+        out: list[float] = []
+        end = self._origin + self._buf.size - 1
+        while self._out_pos <= end:
+            i = int(np.floor(self._out_pos - self._origin))
+            frac = self._out_pos - self._origin - i
+            if i + 1 >= self._buf.size:
+                break
+            out.append((1.0 - frac) * self._buf[i] + frac * self._buf[i + 1])
+            self._out_pos += self.speed
+        keep = int(np.floor(self._out_pos - self._origin))
+        if keep > 0:
+            self._origin += keep
+            self._buf = self._buf[keep:]
+        if not out:
+            return np.zeros(0, dtype=np.float32)
+        return np.asarray(out, dtype=np.float32)
+
+
 import torch
 if torch.cuda.is_available():
     torch.cuda.init()
@@ -437,6 +477,7 @@ class Engine:
         except Exception:  # noqa: BLE001
             log.warning("text_frontend 실패, 정규화 없이 합성: %s", text)
             segs = self.cv.frontend.text_normalize(text, split=True, text_frontend=False)
+        speeder = StreamSpeed(SPEECH_SPEED)
         try:
             for seg in segs:
                 if cancel.is_set():
@@ -446,12 +487,15 @@ class Engine:
                 if self._prof and "t_tts_enter" not in self._prof:
                     self._prof["t_tts_enter"] = t_enter
                     self._prof["frontend_ms"] = (t_enter - self._prof.get("t_synth", t_enter)) * 1000
+                # stream=True 경로는 speed 인자를 무시한다. 파형 길이는 StreamSpeed 가 줄인다.
                 gen = self.cv.model.tts(**self._model_input(preset, seg), stream=True, speed=1.0)
                 try:
                     for out in gen:
                         if cancel.is_set():
                             break
-                        wav = out["tts_speech"].squeeze(0).numpy()
+                        wav = speeder.push(out["tts_speech"].squeeze(0).numpy())
+                        if wav.size == 0:
+                            continue
                         yield (np.clip(wav, -1.0, 1.0) * 32767).astype("<i2").tobytes()
                 except _SynthCancelled:
                     log.info("합성 취소 중단 (token2wav/flow/hift 차단)")
