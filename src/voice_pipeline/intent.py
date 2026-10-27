@@ -123,6 +123,10 @@ _CRISIS_PATTERNS = [
     r"버티기\s*힘들어서\s*죽",
     r"자살",
     r"자해",
+    r"살기\s*싫",
+    r"극단적\s*선택",
+    r"유서",
+    r"투신",
 ]
 _CRISIS_RE = re.compile("|".join(_CRISIS_PATTERNS), re.IGNORECASE)
 
@@ -134,7 +138,7 @@ _COMMAND_RULES: list[tuple[str, str, str, re.Pattern[str]]] = [
         GRADE_IMMEDIATE,
         "session_start",
         re.compile(
-            r"^(?:(?:지금\s*)?시작(?:하자|할게요|해\s*(?:줘|주세요|요)|해|합시다)|안녕하세요|말동무\s*해\s*(?:줘|주세요)|(?:이야기|대화|얘기)\s*(?:를?\s*하고\s*싶어요|하고\s*싶어요|좀\s*나누고\s*싶어요|시작해\s*(?:줘|주세요)))$",
+            r"^(?:(?:지금\s*)?시작(?:하자|할게요|해\s*(?:줘|주세요|요)|해|합시다)|안녕하세요|말동무\s*해\s*(?:줘|주세요)|(?:이야기|대화|얘기)(?:[을를])?\s*(?:하고\s*싶어요|좀\s*나누고\s*싶어요|시작해\s*(?:줘|주세요)))$",
             re.IGNORECASE,
         ),
     ),
@@ -184,7 +188,7 @@ _COMMAND_RULES: list[tuple[str, str, str, re.Pattern[str]]] = [
         GRADE_CONFIRM,
         "session_end",
         re.compile(
-            r"^(?:그만할게요|(?:이제\s*)?끝내자|대화\s*끝낼게요|이만\s*종료할게요|그만\s*끝내\s*(?:줘|주세요)|오늘\s*대화는\s*여기까지\s*할게요|(?:이제\s*)?그만\s*마치자|종료(?:해\s*(?:줘|주세요)|할게요)?)$",
+            r"^(?:그만할게요|(?:이제\s*)?끝내자|대화(?:[을를])?\s*끝낼게요|이만\s*종료할게요|그만\s*끝내\s*(?:줘|주세요)|오늘\s*대화는\s*여기까지\s*할게요|(?:이제\s*)?그만\s*마치자|종료(?:해\s*(?:줘|주세요)|할게요)?)$",
             re.IGNORECASE,
         ),
     ),
@@ -214,7 +218,7 @@ _COMMAND_RULES: list[tuple[str, str, str, re.Pattern[str]]] = [
         GRADE_IMMEDIATE,
         "confirm_yes",
         re.compile(
-            r"^(?:네|응|그래요|예|맞아요|그렇게\s*해\s*주세요|네\s*맞습니다|좋아요)$",
+            r"^(?:네|응|그래요|예|맞아요|그렇게\s*해\s*주세요|네\s*맞습니다|맞습니다|그러자|그럴게요|좋아요)$",
             re.IGNORECASE,
         ),
     ),
@@ -224,7 +228,7 @@ _COMMAND_RULES: list[tuple[str, str, str, re.Pattern[str]]] = [
         GRADE_IMMEDIATE,
         "confirm_no",
         re.compile(
-            r"^(?:아니요|아니|취소할래요|안\s*할래요|아니\s*괜찮아요|하지\s*마세요|아니요\s*취소해\s*주세요|됐어요\s*안\s*할게요)$",
+            r"^(?:아니요|아니|아뇨|싫어요|아닙니다|취소할래요|안\s*할래요|아니\s*괜찮아요|하지\s*마세요|아니요\s*취소해\s*주세요|됐어요\s*안\s*할게요)$",
             re.IGNORECASE,
         ),
     ),
@@ -234,7 +238,7 @@ _COMMAND_RULES: list[tuple[str, str, str, re.Pattern[str]]] = [
         GRADE_CONFIRM,
         "camera_on",
         re.compile(
-            r"^(?:(?:카메라|표정\s*인식|얼굴\s*감정|표정\s*분석)\s*(?:켜\s*(?:줘|주세요)|작동시켜\s*(?:줘|주세요)))$",
+            r"^(?:(?:카메라|표정\s*인식|얼굴\s*감정|표정\s*분석)(?:[을를이가은는])?\s*(?:켜\s*(?:줘|주세요)|작동시켜\s*(?:줘|주세요)))$",
             re.IGNORECASE,
         ),
     ),
@@ -244,7 +248,7 @@ _COMMAND_RULES: list[tuple[str, str, str, re.Pattern[str]]] = [
         GRADE_IMMEDIATE,
         "camera_off",
         re.compile(
-            r"^(?:(?:카메라|표정\s*인식|얼굴\s*감정|표정\s*분석)\s*(?:꺼\s*(?:줘|주세요)|중지해\s*(?:줘|주세요)))$",
+            r"^(?:(?:카메라|표정\s*인식|얼굴\s*감정|표정\s*분석)(?:[을를이가은는])?\s*(?:꺼\s*(?:줘|주세요)|중지해\s*(?:줘|주세요)))$",
             re.IGNORECASE,
         ),
     ),
@@ -274,7 +278,7 @@ _COMMAND_RULES: list[tuple[str, str, str, re.Pattern[str]]] = [
         GRADE_IMMEDIATE,
         "dev_info_on",
         re.compile(
-            r"^(?:(?:개발\s*(?:정보|패널)|지연\s*(?:시간\s*)?표)\s*(?:보여\s*(?:줘|주세요)|켜\s*(?:줘|주세요)|표시해\s*(?:줘|주세요)))$",
+            r"^(?:(?:개발\s*(?:정보|패널)|지연\s*(?:시간\s*)?표)(?:[을를이가은는])?\s*(?:보여\s*(?:줘|주세요)|켜\s*(?:줘|주세요)|표시해\s*(?:줘|주세요)))$",
             re.IGNORECASE,
         ),
     ),
@@ -284,7 +288,7 @@ _COMMAND_RULES: list[tuple[str, str, str, re.Pattern[str]]] = [
         GRADE_IMMEDIATE,
         "dev_info_off",
         re.compile(
-            r"^(?:(?:개발\s*(?:정보|패널)|지연\s*(?:시간\s*)?표)\s*(?:숨겨\s*(?:줘|주세요)|꺼\s*(?:줘|주세요)|가려\s*(?:줘|주세요)))$",
+            r"^(?:(?:개발\s*(?:정보|패널)|지연\s*(?:시간\s*)?표)(?:[을를이가은는])?\s*(?:숨겨\s*(?:줘|주세요)|꺼\s*(?:줘|주세요)|가려\s*(?:줘|주세요)))$",
             re.IGNORECASE,
         ),
     ),
@@ -294,7 +298,7 @@ _COMMAND_RULES: list[tuple[str, str, str, re.Pattern[str]]] = [
         GRADE_IMMEDIATE,
         "badge_toggle",
         re.compile(
-            r"^(?:(?:카메라\s*(?:표시|배지)|연결\s*상태(?:\s*표시)?|(?:AI|에이아이)\s*고지)\s*(?:숨겨\s*(?:줘|주세요)|꺼\s*(?:줘|주세요)|보여\s*(?:줘|주세요)|켜\s*(?:줘|주세요)))$",
+            r"^(?:(?:카메라\s*(?:표시|배지)|연결\s*상태(?:\s*표시)?|(?:AI|에이아이)\s*고지)(?:[을를이가은는])?\s*(?:숨겨\s*(?:줘|주세요)|꺼\s*(?:줘|주세요)|보여\s*(?:줘|주세요)|켜\s*(?:줘|주세요)))$",
             re.IGNORECASE,
         ),
     ),

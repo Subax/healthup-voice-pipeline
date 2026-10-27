@@ -274,6 +274,49 @@ def test_latency_budget():
     assert p99 <= 5.0, f"P99 지연 시간 초과: {p99:.4f}ms > 5.0ms"
 
 
+def test_d1b_particle_confirm_and_crisis_stems():
+    """D1b: 조사, 확인 구어, 위기 어간. D1 녹음 재실행은 하지 않는다."""
+    start = classify_intent("대화를 시작해 줘", state="idle")
+    assert start.intent == INTENT_SESSION_START
+    assert start.grade == GRADE_IMMEDIATE
+
+    end = classify_intent("대화를 끝낼게요", state="active")
+    assert end.intent == INTENT_SESSION_END
+    assert end.grade == GRADE_CONFIRM
+
+    camera = classify_intent("카메라를 켜 줘", state="active")
+    assert camera.intent == INTENT_CAMERA_ON
+    assert camera.grade == GRADE_CONFIRM
+    assert camera.payload == {"target": "face", "enabled": True}
+
+    info = classify_intent("개발 정보를 보여 줘", state="idle")
+    assert info.intent == INTENT_DEV_INFO_ON
+    assert info.payload == {"target": "show_dev_info", "enabled": True}
+
+    conn = classify_intent("연결 상태를 숨겨 줘", state="active")
+    assert conn.intent == INTENT_UI_BADGE_TOGGLE
+    assert conn.grade == GRADE_IMMEDIATE
+    assert conn.payload == {"target": "show_conn_status", "enabled": False}
+
+    for text in ("맞습니다", "그러자", "그럴게요"):
+        yes = classify_intent(text, state="confirming")
+        assert yes.intent == INTENT_CONFIRM_YES, text
+        chat = classify_intent(text, state="active")
+        assert not chat.is_command, text
+
+    for text in ("아뇨", "싫어요", "아닙니다"):
+        no = classify_intent(text, state="confirming")
+        assert no.intent == INTENT_CONFIRM_NO, text
+        chat = classify_intent(text, state="active")
+        assert not chat.is_command, text
+
+    for text in ("살기 싫어", "극단적 선택", "유서", "투신"):
+        assert is_crisis(text), text
+        res = classify_intent(text, state="active")
+        assert res.intent == INTENT_CHAT
+        assert res.rule == "crisis_blocked"
+
+
 def test_intent_eval_bench_suite():
     """bench/intent_eval.py 실행 결과가 ALL PASS인지 검증."""
     from bench.intent_eval import run_evaluation
