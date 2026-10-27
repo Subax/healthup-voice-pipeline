@@ -1034,6 +1034,16 @@ $("prefDevInfo").onchange = (e) => {
   send({ type: "config", show_dev_info: prefs.show_dev_info });
 };
 
-// 초기화 적용
+function applyStoredFace() {
+  const hud = window.FaceHud;
+  const plan = hud && hud.restoreFaceOnLoad
+    ? hud.restoreFaceOnLoad(!!prefs.face, !!faceConsented, currentMode)
+    : { face: !!prefs.face && !!faceConsented, startCamera: !!prefs.face && !!faceConsented, showPreview: false };
+  prefs.face = !!plan.face;
+  if ($("prefFace")) $("prefFace").checked = !!plan.face;
+  if (plan.startCamera) startCamera();
+}
+
+// 초기화 적용. 동의와 저장값이 맞으면 카메라를 켠다. 동의가 없으면 체크를 끈다.
 setMode(currentMode, false);
-applyVisibility();
+applyStoredFace();

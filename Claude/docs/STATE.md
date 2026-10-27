@@ -11,7 +11,7 @@
 
 ## 1. 현재 상태 (최종 갱신: 2026-10-27)
 
-이번 세션: `scripts/fetch_face_models.sh` 주석의 가운데점을 쉼표로 바꿨다 (`80ecec5`). D1b로 명령 문형에 조사, 확인 구어, 위기 어간을 보강했다 (`dc8cabe`). pytest 330 passed. D1 녹음 재실행과 서버 부하 측정은 하지 않았다. 웹 서버와 컨테이너는 재시작하거나 멈추지 않았다.
+이번 세션: 페이지를 열 때 얼굴 저장값과 동의가 모두 있으면 `startCamera()`를 호출한다. 동의가 없으면 체크를 끈다. 미리보기는 개발 모드에서만 보인다. pytest 331 passed. 웹 서버와 컨테이너는 재시작하거나 멈추지 않았다. 브라우저로 카메라 화면은 확인하지 않았다.
 
 **결론**: 지연 개선 코드를 모두 넣었다. 본문 첫 오디오는 P50 1.8초(목표 1.0초)로 아직 미달이다. 남은 병목은 LLM과 같은 GPU를 쓰는 TTS 첫 오디오(약 1.0초)다. 맞장구는 발화 끝 0.35초에 난다.
 남은 일은 대부분 **녹음·청취·태블릿 실기**가 필요하다 (`docs/PLAN.md` §3).
@@ -24,8 +24,8 @@
 
 **저장소**
 
-- git `main` @ `dc8cabe` (직전 `80ecec5`). 푸시하지 않았다
-- 테스트: 330 passed (`.venv/bin/python -m pytest`, 174.82초). 경고 5건은 기존 `test_tts_cosyvoice.py`의 `NotAppKeyWarning`
+- git `main`. 직전 문서 커밋은 `8c5f76a`. 푸시하지 않았다
+- 테스트: 331 passed (`.venv/bin/python -m pytest`, 175.75초). 경고 5건은 기존 `test_tts_cosyvoice.py`의 `NotAppKeyWarning`
 - 서비스: 이 세션에서 웹 서버와 컨테이너를 재시작하거나 멈추지 않았다. 실행 여부는 확인하지 않았다.
 
 **구현 완료**
@@ -167,6 +167,14 @@
 ---
 
 ## 3. 세션 로그 (최신이 위)
+
+### 2026-10-27 저장된 얼굴 설정에서 카메라 복원
+
+한 일: 처음 불러올 때 `prefs.face`와 `faceConsented`가 맞으면 `startCamera()`를 호출한다. 동의가 없으면 체크를 끈다.
+확인한 것: `.venv/bin/python -m pytest` 331 passed, 175.75초. `tests/test_face_hud.py` 5 passed. 개발 모드에서만 `showPreview`가 참이다.
+확인하지 않은 것: 브라우저에서 실제 카메라 미리보기.
+코드 변경: `web/static/app.js`, `web/static/face-hud.js`, `tests/test_face_hud.py`
+다음: 개발 모드로 페이지를 다시 열고 미리보기가 따라오는지 본다.
 
 ### 2026-10-27 주석 쉼표, D1b 문형 보강
 

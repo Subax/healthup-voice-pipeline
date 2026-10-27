@@ -10,6 +10,18 @@
     return mode === "dev";
   }
 
+  function restoreFaceOnLoad(face, consented, mode) {
+    if (!consented) {
+      return { face: false, startCamera: false, showPreview: false };
+    }
+    const on = !!face;
+    return {
+      face: on,
+      startCamera: on,
+      showPreview: on && faceHudVisible(mode),
+    };
+  }
+
   function scoreText(value) {
     const n = Number(value);
     if (!Number.isFinite(n)) return "없음";
@@ -54,5 +66,5 @@
     };
   }
 
-  return { faceHudVisible: faceHudVisible, lines: lines };
+  return { faceHudVisible: faceHudVisible, restoreFaceOnLoad: restoreFaceOnLoad, lines: lines };
 });

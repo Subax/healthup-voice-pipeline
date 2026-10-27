@@ -87,6 +87,39 @@ def test_face_hud_empty_state_and_camera_error():
     assert view["camera"] == "거부: 권한 없음"
 
 
+def test_restore_face_starts_camera_only_with_consent():
+    script = (
+        "const hud = require(" + json.dumps(str(HUD)) + ");\n"
+        "const cases = ["
+        "{face:true, consented:true, mode:'dev'},"
+        "{face:true, consented:true, mode:'demo'},"
+        "{face:true, consented:false, mode:'dev'},"
+        "{face:false, consented:true, mode:'dev'}"
+        "];\n"
+        "const out = cases.map((c) => Object.assign({mode:c.mode}, hud.restoreFaceOnLoad(c.face, c.consented, c.mode)));\n"
+        "process.stdout.write(JSON.stringify(out));\n"
+    )
+    out = json.loads(_node(script))
+    assert out[0] == {"mode": "dev", "face": True, "startCamera": True, "showPreview": True}
+    assert out[1] == {"mode": "demo", "face": True, "startCamera": True, "showPreview": False}
+    assert out[2] == {"mode": "dev", "face": False, "startCamera": False, "showPreview": False}
+    assert out[3] == {"mode": "dev", "face": False, "startCamera": False, "showPreview": False}
+
+    html = HTML.read_text(encoding="utf-8")
+    hud_at = html.index('id="faceHud"')
+    video_at = html.index('id="faceVideo"')
+    preview_at = html.index('id="facePreview"')
+    hud_end = html.index("</div>", video_at)
+    assert hud_at < preview_at < video_at < hud_end
+
+    app = APP.read_text(encoding="utf-8")
+    assert "restoreFaceOnLoad" in app
+    assert "if (plan.startCamera) startCamera();" in app
+    assert "plan.face" in app
+    init = app.index("function applyStoredFace()")
+    assert app.index("setMode(currentMode, false);", init) < app.index("applyStoredFace();", init)
+
+
 def test_face_hud_markup_stays_hidden_and_sends_no_pixels():
     html = HTML.read_text(encoding="utf-8")
     assert 'id="faceHud" hidden' in html
